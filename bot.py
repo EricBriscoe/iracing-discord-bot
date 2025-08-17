@@ -21,7 +21,7 @@ def is_server_owner():
 class iRacingBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
-        intents.message_content = True
+        intents.message_content = False  # Not needed for slash commands only
         super().__init__(command_prefix='!', intents=intents)
         
         self.db = Database()
