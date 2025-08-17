@@ -46,7 +46,7 @@ bot = iRacingBot()
     discord_user="[ADMIN ONLY] The Discord user to link (leave empty to link yourself)"
 )
 async def link_iracing(interaction: discord.Interaction, iracing_username: str, discord_user: discord.User = None):
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer()
     
     target_user = discord_user if discord_user else interaction.user
     is_admin_action = discord_user is not None
@@ -110,7 +110,7 @@ async def link_iracing(interaction: discord.Interaction, iracing_username: str, 
     discord_user="[ADMIN ONLY] The Discord user to unlink (leave empty to unlink yourself)"
 )
 async def unlink_iracing(interaction: discord.Interaction, discord_user: discord.User = None):
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer()
     
     target_user = discord_user if discord_user else interaction.user
     is_admin_action = discord_user is not None
