@@ -1,0 +1,17 @@
+node_modules
+npm-debug.log
+dist
+.git
+.gitignore
+README.md
+.env
+.env.example
+*.py
+requirements.txt
+__pycache__
+.pytest_cache
+.coverage
+.nyc_output
+coverage
+.DS_Store
+Thumbs.db

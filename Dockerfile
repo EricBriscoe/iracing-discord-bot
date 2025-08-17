@@ -1,10 +1,22 @@
-FROM python:3.11-slim
+FROM node:18-alpine
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy package files
+COPY package*.json ./
+COPY tsconfig.json ./
 
-COPY . .
+# Install dependencies
+RUN npm ci --only=production
 
-CMD ["python", "bot.py"]
+# Copy source code
+COPY src/ ./src/
+
+# Build TypeScript
+RUN npm run build
+
+# Create data directory
+RUN mkdir -p data
+
+# Start the application
+CMD ["npm", "start"]

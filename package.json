@@ -1,0 +1,29 @@
+{
+  "name": "iracing-discord-bot",
+  "version": "1.0.0",
+  "description": "iRacing Discord Bot - TypeScript Edition",
+  "main": "dist/bot.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/bot.js",
+    "dev": "ts-node src/bot.ts",
+    "clean": "rm -rf dist"
+  },
+  "keywords": ["discord", "bot", "iracing", "typescript"],
+  "author": "Eric Briscoe",
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.3.1",
+    "sqlite3": "^5.1.6",
+    "axios": "^1.6.2",
+    "node-cron": "^3.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.4",
+    "@types/sqlite3": "^3.1.11",
+    "@types/node-cron": "^3.0.11",
+    "typescript": "^5.3.3",
+    "ts-node": "^10.9.1"
+  }
+}
