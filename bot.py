@@ -20,8 +20,9 @@ def is_server_owner():
 
 class iRacingBot(commands.Bot):
     def __init__(self):
-        intents = discord.Intents.default()
-        intents.message_content = False  # Not needed for slash commands only
+        # Use minimal intents for slash commands only - no privileged intents needed
+        intents = discord.Intents.none()
+        intents.guilds = True  # Required for guild operations and slash commands
         super().__init__(command_prefix='!', intents=intents)
         
         self.db = Database()
