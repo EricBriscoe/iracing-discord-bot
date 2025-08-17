@@ -7,7 +7,6 @@ services:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - IRACING_USERNAME=${IRACING_USERNAME}
       - IRACING_PASSWORD=${IRACING_PASSWORD}
-      - LEADERBOARD_CHANNEL_ID=${LEADERBOARD_CHANNEL_ID}
     volumes:
       - ./data:/app/data
     restart: unless-stopped

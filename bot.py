@@ -26,16 +26,13 @@ class iRacingBot(commands.Bot):
         
         self.db = Database()
         self.iracing = iRacingClient()
-        self.leaderboard_channel_id = os.getenv('LEADERBOARD_CHANNEL_ID')
-        self.leaderboard_message_id = None
     
     async def setup_hook(self):
         await self.db.init_db()
         await self.tree.sync()
         logger.info("Slash commands synced")
         
-        if self.leaderboard_channel_id:
-            self.update_leaderboard.start()
+        self.update_leaderboard.start()
     
     async def on_ready(self):
         logger.info(f'{self.user} has connected to Discord!')
@@ -180,25 +177,100 @@ async def list_links_admin(interaction: discord.Interaction):
         logger.error(f"Error listing links: {e}")
         await interaction.followup.send("❌ An error occurred while listing linked accounts.")
 
-@tasks.loop(minutes=30)
-async def update_leaderboard():
-    if not bot.leaderboard_channel_id:
-        return
+@bot.tree.command(name="add-stats-channel", description="[ADMIN] Set a channel for iRacing leaderboard updates")
+@discord.app_commands.describe(channel="The channel to use for leaderboard updates")
+@is_server_owner()
+async def add_stats_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    await interaction.response.defer()
     
     try:
-        channel = bot.get_channel(int(bot.leaderboard_channel_id))
+        await bot.db.set_stats_channel(interaction.guild.id, channel.id)
+        
+        embed = discord.Embed(
+            title="✅ Stats Channel Configured",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Channel", value=channel.mention, inline=True)
+        embed.add_field(name="Guild", value=interaction.guild.name, inline=True)
+        embed.add_field(name="Configured by", value=interaction.user.mention, inline=True)
+        embed.description = f"The leaderboard will now be automatically updated in {channel.mention} every 30 minutes."
+        
+        await interaction.followup.send(embed=embed)
+        
+        # Trigger an immediate leaderboard update for this guild
+        asyncio.create_task(update_guild_leaderboard(interaction.guild.id))
+        
+    except Exception as e:
+        logger.error(f"Error setting stats channel: {e}")
+        await interaction.followup.send("❌ An error occurred while configuring the stats channel.")
+
+@bot.tree.command(name="remove-stats-channel", description="[ADMIN] Remove leaderboard updates from this server")
+@is_server_owner()
+async def remove_stats_channel(interaction: discord.Interaction):
+    await interaction.response.defer()
+    
+    try:
+        config = await bot.db.get_stats_channel(interaction.guild.id)
+        if not config:
+            await interaction.followup.send("❌ No stats channel is currently configured for this server.")
+            return
+        
+        await bot.db.remove_stats_channel(interaction.guild.id)
+        
+        embed = discord.Embed(
+            title="✅ Stats Channel Removed",
+            color=discord.Color.orange()
+        )
+        embed.add_field(name="Guild", value=interaction.guild.name, inline=True)
+        embed.add_field(name="Removed by", value=interaction.user.mention, inline=True)
+        embed.description = "Leaderboard updates have been disabled for this server."
+        
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        logger.error(f"Error removing stats channel: {e}")
+        await interaction.followup.send("❌ An error occurred while removing the stats channel.")
+
+async def update_guild_leaderboard(guild_id: int):
+    """Update leaderboard for a specific guild"""
+    try:
+        config = await bot.db.get_stats_channel(guild_id)
+        if not config:
+            return
+        
+        channel_id, message_id = config
+        channel = bot.get_channel(channel_id)
         if not channel:
-            logger.error(f"Could not find leaderboard channel: {bot.leaderboard_channel_id}")
+            logger.error(f"Could not find stats channel {channel_id} for guild {guild_id}")
             return
         
-        users = await bot.db.get_all_users()
-        if not users:
+        guild = bot.get_guild(guild_id)
+        if not guild:
+            logger.error(f"Could not find guild {guild_id}")
             return
         
-        leaderboard_data = []
+        # Get all users and filter for this guild
+        all_users = await bot.db.get_all_users()
+        guild_users = []
         
-        for discord_id, iracing_username, customer_id in users:
-            if customer_id:
+        for discord_id, iracing_username, customer_id in all_users:
+            member = guild.get_member(discord_id)
+            if member and customer_id:  # Only include users who are in this guild
+                guild_users.append((discord_id, iracing_username, customer_id))
+        
+        if not guild_users:
+            # No users in this guild, create empty leaderboard
+            embed = discord.Embed(
+                title=f"🏁 {guild.name} iRacing Leaderboard (Road)",
+                color=discord.Color.blue(),
+                timestamp=discord.utils.utcnow()
+            )
+            embed.description = "No linked accounts found. Use `/link` to add your iRacing account!"
+            embed.set_footer(text="Updates every 30 minutes")
+        else:
+            leaderboard_data = []
+            
+            for discord_id, iracing_username, customer_id in guild_users:
                 member_data = await bot.iracing.get_member_summary(customer_id)
                 if member_data:
                     licenses = member_data.get('licenses', [])
@@ -216,47 +288,60 @@ async def update_leaderboard():
                             'safety_rating': safety_rating,
                             'license_level': license_level
                         })
-        
-        leaderboard_data.sort(key=lambda x: x['irating'], reverse=True)
-        
-        embed = discord.Embed(
-            title="🏁 iRacing Leaderboard (Road)",
-            color=discord.Color.blue(),
-            timestamp=discord.utils.utcnow()
-        )
-        
-        if leaderboard_data:
-            leaderboard_text = ""
-            for i, data in enumerate(leaderboard_data[:10], 1):
-                user = bot.get_user(data['discord_id'])
-                display_name = user.display_name if user else data['iracing_username']
-                
-                leaderboard_text += f"{i}. **{display_name}** ({data['iracing_username']})\n"
-                leaderboard_text += f"   iRating: {data['irating']} | SR: {data['safety_rating']:.2f} | License: {data['license_level']}\n\n"
             
-            embed.description = leaderboard_text
-        else:
-            embed.description = "No linked accounts found. Use `/link` to add your iRacing account!"
+            leaderboard_data.sort(key=lambda x: x['irating'], reverse=True)
+            
+            embed = discord.Embed(
+                title=f"🏁 {guild.name} iRacing Leaderboard (Road)",
+                color=discord.Color.blue(),
+                timestamp=discord.utils.utcnow()
+            )
+            
+            if leaderboard_data:
+                leaderboard_text = ""
+                for i, data in enumerate(leaderboard_data[:10], 1):
+                    member = guild.get_member(data['discord_id'])
+                    display_name = member.display_name if member else data['iracing_username']
+                    
+                    leaderboard_text += f"{i}. **{display_name}** ({data['iracing_username']})\n"
+                    leaderboard_text += f"   iRating: {data['irating']} | SR: {data['safety_rating']:.2f} | License: {data['license_level']}\n\n"
+                
+                embed.description = leaderboard_text
+            else:
+                embed.description = "No linked accounts found. Use `/link` to add your iRacing account!"
+            
+            embed.set_footer(text="Updates every 30 minutes")
         
-        embed.set_footer(text="Updates every 30 minutes")
-        
-        if bot.leaderboard_message_id:
+        # Try to update existing message first
+        if message_id:
             try:
-                message = await channel.fetch_message(bot.leaderboard_message_id)
+                message = await channel.fetch_message(message_id)
                 await message.edit(embed=embed)
                 return
             except discord.NotFound:
-                bot.leaderboard_message_id = None
+                # Message was deleted, clear the message_id
+                await bot.db.update_stats_message_id(guild_id, None)
         
+        # Clear channel of bot messages and post new one
         async for message in channel.history(limit=100):
             if message.author == bot.user:
                 await message.delete()
         
         new_message = await channel.send(embed=embed)
-        bot.leaderboard_message_id = new_message.id
+        await bot.db.update_stats_message_id(guild_id, new_message.id)
         
     except Exception as e:
-        logger.error(f"Error updating leaderboard: {e}")
+        logger.error(f"Error updating leaderboard for guild {guild_id}: {e}")
+
+@tasks.loop(minutes=30)
+async def update_leaderboard():
+    """Update leaderboards for all configured guilds"""
+    try:
+        guild_configs = await bot.db.get_all_guild_configs()
+        for guild_id, channel_id, message_id in guild_configs:
+            await update_guild_leaderboard(guild_id)
+    except Exception as e:
+        logger.error(f"Error in leaderboard update loop: {e}")
 
 bot.update_leaderboard = update_leaderboard
 
