@@ -36,7 +36,7 @@ class iRacingClient:
             try:
                 client = await self._get_client()
                 loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(None, lambda: client.lookup_drivers(term=username, search_type=1))
+                result = await loop.run_in_executor(None, lambda: client.lookup_drivers(search_term=username, search_type=1))
                 
                 if result and len(result) > 0:
                     for member in result:
