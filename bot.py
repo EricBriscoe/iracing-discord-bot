@@ -12,6 +12,12 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def is_server_owner():
+    """Check if user is the server owner"""
+    def predicate(interaction: discord.Interaction) -> bool:
+        return interaction.guild and interaction.user.id == interaction.guild.owner_id
+    return discord.app_commands.check(predicate)
+
 class iRacingBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -88,6 +94,91 @@ async def link_iracing(interaction: discord.Interaction, iracing_username: str):
         logger.error(f"Error linking account: {e}")
         await interaction.followup.send("❌ An error occurred while linking your account. Please try again later.")
 
+@bot.tree.command(name="link-user", description="[ADMIN] Link another user's iRacing account")
+@discord.app_commands.describe(
+    discord_user="The Discord user to link",
+    iracing_username="The iRacing username to link to this user"
+)
+@is_server_owner()
+async def link_user_admin(interaction: discord.Interaction, discord_user: discord.User, iracing_username: str):
+    await interaction.response.defer()
+    
+    try:
+        customer_id = await bot.iracing.search_member(iracing_username)
+        
+        if not customer_id:
+            await interaction.followup.send(f"❌ Could not find iRacing user: {iracing_username}")
+            return
+        
+        member_data = await bot.iracing.get_member_summary(customer_id)
+        if not member_data:
+            await interaction.followup.send(f"❌ Could not retrieve data for iRacing user: {iracing_username}")
+            return
+        
+        await bot.db.add_user(discord_user.id, iracing_username, customer_id)
+        
+        embed = discord.Embed(
+            title="✅ Account Linked Successfully (Admin)",
+            color=discord.Color.orange()
+        )
+        embed.add_field(name="Discord User", value=discord_user.mention, inline=True)
+        embed.add_field(name="iRacing User", value=iracing_username, inline=True)
+        embed.add_field(name="Customer ID", value=str(customer_id), inline=True)
+        embed.add_field(name="Linked by", value=interaction.user.mention, inline=True)
+        
+        if member_data:
+            licenses = member_data.get('licenses', [])
+            if licenses:
+                road_license = next((l for l in licenses if l.get('category_id') == 2), None)
+                oval_license = next((l for l in licenses if l.get('category_id') == 1), None)
+                
+                if road_license:
+                    embed.add_field(
+                        name="Road License", 
+                        value=f"{road_license.get('license_level', 'N/A')} {road_license.get('safety_rating', 0):.2f}",
+                        inline=True
+                    )
+                if oval_license:
+                    embed.add_field(
+                        name="Oval License",
+                        value=f"{oval_license.get('license_level', 'N/A')} {oval_license.get('safety_rating', 0):.2f}",
+                        inline=True
+                    )
+        
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        logger.error(f"Error linking account: {e}")
+        await interaction.followup.send("❌ An error occurred while linking the account. Please try again later.")
+
+@bot.tree.command(name="unlink-user", description="[ADMIN] Unlink another user's iRacing account")
+@discord.app_commands.describe(discord_user="The Discord user to unlink")
+@is_server_owner()
+async def unlink_user_admin(interaction: discord.Interaction, discord_user: discord.User):
+    await interaction.response.defer()
+    
+    try:
+        user_data = await bot.db.get_user(discord_user.id)
+        if not user_data:
+            await interaction.followup.send(f"❌ No iRacing account linked to {discord_user.mention}.")
+            return
+        
+        await bot.db.remove_user(discord_user.id)
+        
+        embed = discord.Embed(
+            title="✅ Account Unlinked Successfully (Admin)",
+            color=discord.Color.orange()
+        )
+        embed.add_field(name="Discord User", value=discord_user.mention, inline=True)
+        embed.add_field(name="Previous iRacing User", value=user_data[0], inline=True)
+        embed.add_field(name="Unlinked by", value=interaction.user.mention, inline=True)
+        
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        logger.error(f"Error unlinking account: {e}")
+        await interaction.followup.send("❌ An error occurred while unlinking the account.")
+
 @bot.tree.command(name="unlink", description="Unlink your iRacing account from Discord")
 async def unlink_iracing(interaction: discord.Interaction):
     await interaction.response.defer()
@@ -104,6 +195,38 @@ async def unlink_iracing(interaction: discord.Interaction):
     except Exception as e:
         logger.error(f"Error unlinking account: {e}")
         await interaction.followup.send("❌ An error occurred while unlinking your account.")
+
+@bot.tree.command(name="list-links", description="[ADMIN] List all linked accounts")
+@is_server_owner()
+async def list_links_admin(interaction: discord.Interaction):
+    await interaction.response.defer()
+    
+    try:
+        users = await bot.db.get_all_users()
+        
+        if not users:
+            await interaction.followup.send("❌ No linked accounts found.")
+            return
+        
+        embed = discord.Embed(
+            title="📋 Linked Accounts",
+            color=discord.Color.blue()
+        )
+        
+        links_text = ""
+        for discord_id, iracing_username, customer_id in users:
+            discord_user = bot.get_user(discord_id)
+            user_display = discord_user.mention if discord_user else f"Unknown User ({discord_id})"
+            links_text += f"{user_display} → **{iracing_username}** (ID: {customer_id})\n"
+        
+        embed.description = links_text
+        embed.set_footer(text=f"Total: {len(users)} linked accounts")
+        
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        logger.error(f"Error listing links: {e}")
+        await interaction.followup.send("❌ An error occurred while listing linked accounts.")
 
 @tasks.loop(minutes=30)
 async def update_leaderboard():
