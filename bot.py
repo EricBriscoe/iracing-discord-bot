@@ -46,23 +46,25 @@ bot = iRacingBot()
     discord_user="[ADMIN ONLY] The Discord user to link (leave empty to link yourself)"
 )
 async def link_iracing(interaction: discord.Interaction, iracing_username: str, discord_user: discord.User = None):
+    await interaction.response.defer()
+    
     target_user = discord_user if discord_user else interaction.user
     is_admin_action = discord_user is not None
     
     if is_admin_action and not (interaction.guild and interaction.user.id == interaction.guild.owner_id):
-        await interaction.response.send_message("❌ Only server owners can link accounts for other users.", ephemeral=True)
+        await interaction.followup.send("❌ Only server owners can link accounts for other users.", ephemeral=True)
         return
     
     try:
         customer_id = await bot.iracing.search_member(iracing_username)
         
         if not customer_id:
-            await interaction.response.send_message(f"❌ Could not find iRacing user: {iracing_username}", ephemeral=True)
+            await interaction.followup.send(f"❌ Could not find iRacing user: {iracing_username}", ephemeral=True)
             return
         
         member_data = await bot.iracing.get_member_summary(customer_id)
         if not member_data:
-            await interaction.response.send_message(f"❌ Could not retrieve data for iRacing user: {iracing_username}", ephemeral=True)
+            await interaction.followup.send(f"❌ Could not retrieve data for iRacing user: {iracing_username}", ephemeral=True)
             return
         
         await bot.db.add_user(target_user.id, iracing_username, customer_id)
@@ -97,11 +99,11 @@ async def link_iracing(interaction: discord.Interaction, iracing_username: str, 
                         inline=True
                     )
         
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
         
     except Exception as e:
         logger.error(f"Error linking account: {e}")
-        await interaction.response.send_message("❌ An error occurred while linking the account. Please try again later.", ephemeral=True)
+        await interaction.followup.send("❌ An error occurred while linking the account. Please try again later.", ephemeral=True)
 
 @bot.tree.command(name="unlink", description="Unlink an iRacing account from Discord")
 @discord.app_commands.describe(
