@@ -177,59 +177,55 @@ async def list_links_admin(interaction: discord.Interaction):
         logger.error(f"Error listing links: {e}")
         await interaction.followup.send("❌ An error occurred while listing linked accounts.")
 
-@bot.tree.command(name="add-stats-channel", description="[ADMIN] Set a channel for iRacing leaderboard updates")
-@discord.app_commands.describe(channel="The channel to use for leaderboard updates")
+@bot.tree.command(name="toggle-stats-channel", description="[ADMIN] Toggle iRacing leaderboard updates for a channel")
+@discord.app_commands.describe(channel="The channel to toggle for leaderboard updates (leave empty to disable)")
 @is_server_owner()
-async def add_stats_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+async def toggle_stats_channel(interaction: discord.Interaction, channel: discord.TextChannel = None):
     await interaction.response.defer()
     
     try:
-        await bot.db.set_stats_channel(interaction.guild.id, channel.id)
+        current_config = await bot.db.get_stats_channel(interaction.guild.id)
         
-        embed = discord.Embed(
-            title="✅ Stats Channel Configured",
-            color=discord.Color.green()
-        )
-        embed.add_field(name="Channel", value=channel.mention, inline=True)
-        embed.add_field(name="Guild", value=interaction.guild.name, inline=True)
-        embed.add_field(name="Configured by", value=interaction.user.mention, inline=True)
-        embed.description = f"The leaderboard will now be automatically updated in {channel.mention} every 30 minutes."
-        
-        await interaction.followup.send(embed=embed)
-        
-        # Trigger an immediate leaderboard update for this guild
-        asyncio.create_task(update_guild_leaderboard(interaction.guild.id))
+        if channel is None:
+            # Disable stats channel
+            if not current_config:
+                await interaction.followup.send("❌ No stats channel is currently configured for this server.")
+                return
+            
+            await bot.db.remove_stats_channel(interaction.guild.id)
+            
+            embed = discord.Embed(
+                title="✅ Stats Channel Disabled",
+                color=discord.Color.orange()
+            )
+            embed.add_field(name="Guild", value=interaction.guild.name, inline=True)
+            embed.add_field(name="Disabled by", value=interaction.user.mention, inline=True)
+            embed.description = "Leaderboard updates have been disabled for this server."
+            
+            await interaction.followup.send(embed=embed)
+            
+        else:
+            # Set/change stats channel
+            await bot.db.set_stats_channel(interaction.guild.id, channel.id)
+            
+            action = "Updated" if current_config else "Configured"
+            embed = discord.Embed(
+                title=f"✅ Stats Channel {action}",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Channel", value=channel.mention, inline=True)
+            embed.add_field(name="Guild", value=interaction.guild.name, inline=True)
+            embed.add_field(name=f"{action} by", value=interaction.user.mention, inline=True)
+            embed.description = f"The leaderboard will now be automatically updated in {channel.mention} every 30 minutes."
+            
+            await interaction.followup.send(embed=embed)
+            
+            # Trigger an immediate leaderboard update for this guild
+            asyncio.create_task(update_guild_leaderboard(interaction.guild.id))
         
     except Exception as e:
-        logger.error(f"Error setting stats channel: {e}")
+        logger.error(f"Error toggling stats channel: {e}")
         await interaction.followup.send("❌ An error occurred while configuring the stats channel.")
-
-@bot.tree.command(name="remove-stats-channel", description="[ADMIN] Remove leaderboard updates from this server")
-@is_server_owner()
-async def remove_stats_channel(interaction: discord.Interaction):
-    await interaction.response.defer()
-    
-    try:
-        config = await bot.db.get_stats_channel(interaction.guild.id)
-        if not config:
-            await interaction.followup.send("❌ No stats channel is currently configured for this server.")
-            return
-        
-        await bot.db.remove_stats_channel(interaction.guild.id)
-        
-        embed = discord.Embed(
-            title="✅ Stats Channel Removed",
-            color=discord.Color.orange()
-        )
-        embed.add_field(name="Guild", value=interaction.guild.name, inline=True)
-        embed.add_field(name="Removed by", value=interaction.user.mention, inline=True)
-        embed.description = "Leaderboard updates have been disabled for this server."
-        
-        await interaction.followup.send(embed=embed)
-        
-    except Exception as e:
-        logger.error(f"Error removing stats channel: {e}")
-        await interaction.followup.send("❌ An error occurred while removing the stats channel.")
 
 async def update_guild_leaderboard(guild_id: int):
     """Update leaderboard for a specific guild"""

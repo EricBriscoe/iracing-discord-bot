@@ -49,8 +49,9 @@ A Discord bot that maintains a leaderboard of iRacing drivers in your server and
   - Admin: `/unlink @otheruser` (server owners only)
 
 ### Admin Commands (Server Owners Only)
-- `/add-stats-channel <channel>`: Set a channel for leaderboard updates
-- `/remove-stats-channel`: Disable leaderboard updates for this server
+- `/toggle-stats-channel [channel]`: Toggle leaderboard updates for a channel
+  - With channel: `/toggle-stats-channel #leaderboard` - Enable/change stats channel
+  - Without channel: `/toggle-stats-channel` - Disable stats channel
 - `/list-links`: View all linked accounts in the server
 
 ## Requirements
