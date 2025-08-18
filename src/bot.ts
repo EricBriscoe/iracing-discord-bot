@@ -129,17 +129,17 @@ class iRacingBot {
     }
 
     private async handleLinkCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+        await interaction.deferReply({ ephemeral: true });
+
         const iracingUsername = interaction.options.getString('iracing_username', true);
         const discordUser = interaction.options.getUser('discord_user');
         const targetUser = discordUser || interaction.user;
         const isAdminAction = discordUser !== null;
 
         if (isAdminAction && !this.isServerOwner(interaction)) {
-            await interaction.reply({ content: '❌ Only server owners can link accounts for other users.', ephemeral: true });
+            await interaction.editReply({ content: '❌ Only server owners can link accounts for other users.' });
             return;
         }
-
-        await interaction.deferReply({ ephemeral: true });
 
         try {
             const customerId = await this.iracing.searchMember(iracingUsername);
@@ -198,16 +198,16 @@ class iRacingBot {
     }
 
     private async handleUnlinkCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+        await interaction.deferReply({ ephemeral: true });
+
         const discordUser = interaction.options.getUser('discord_user');
         const targetUser = discordUser || interaction.user;
         const isAdminAction = discordUser !== null;
 
         if (isAdminAction && !this.isServerOwner(interaction)) {
-            await interaction.reply({ content: '❌ Only server owners can unlink accounts for other users.', ephemeral: true });
+            await interaction.editReply({ content: '❌ Only server owners can unlink accounts for other users.' });
             return;
         }
-
-        await interaction.deferReply({ ephemeral: true });
 
         try {
             const userData = await this.db.getUser(targetUser.id);
@@ -241,12 +241,12 @@ class iRacingBot {
     }
 
     private async handleListLinksCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+        await interaction.deferReply({ ephemeral: true });
+
         if (!this.isServerOwner(interaction)) {
-            await interaction.reply({ content: '❌ Only server owners can use this command.', ephemeral: true });
+            await interaction.editReply({ content: '❌ Only server owners can use this command.' });
             return;
         }
-
-        await interaction.deferReply({ ephemeral: true });
 
         try {
             const users = await this.db.getAllUsers();
@@ -278,15 +278,15 @@ class iRacingBot {
     }
 
     private async handleToggleStatsChannelCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+        await interaction.deferReply({ ephemeral: true });
+
         if (!this.isServerOwner(interaction)) {
-            await interaction.reply({ content: '❌ Only server owners can use this command.', ephemeral: true });
+            await interaction.editReply({ content: '❌ Only server owners can use this command.' });
             return;
         }
 
         const channel = interaction.options.getChannel('channel') as TextChannel | null;
         const guildId = interaction.guildId!;
-
-        await interaction.deferReply({ ephemeral: true });
 
         try {
             const currentConfig = await this.db.getStatsChannel(guildId);
