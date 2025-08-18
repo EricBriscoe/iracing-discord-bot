@@ -129,7 +129,7 @@ class iRacingBot {
     }
 
     private async handleLinkCommand(interaction: ChatInputCommandInteraction): Promise<void> {
-        await interaction.deferReply({ ephemeral: true });
+        interaction.deferReply({ ephemeral: true });
 
         const iracingUsername = interaction.options.getString('iracing_username', true);
         const discordUser = interaction.options.getUser('discord_user');
@@ -198,7 +198,7 @@ class iRacingBot {
     }
 
     private async handleUnlinkCommand(interaction: ChatInputCommandInteraction): Promise<void> {
-        await interaction.deferReply({ ephemeral: true });
+        interaction.deferReply({ ephemeral: true });
 
         const discordUser = interaction.options.getUser('discord_user');
         const targetUser = discordUser || interaction.user;
@@ -241,7 +241,7 @@ class iRacingBot {
     }
 
     private async handleListLinksCommand(interaction: ChatInputCommandInteraction): Promise<void> {
-        await interaction.deferReply({ ephemeral: true });
+        interaction.deferReply({ ephemeral: true });
 
         if (!this.isServerOwner(interaction)) {
             await interaction.editReply({ content: '❌ Only server owners can use this command.' });
@@ -278,7 +278,7 @@ class iRacingBot {
     }
 
     private async handleToggleStatsChannelCommand(interaction: ChatInputCommandInteraction): Promise<void> {
-        await interaction.deferReply({ ephemeral: true });
+        interaction.deferReply({ ephemeral: true });
 
         if (!this.isServerOwner(interaction)) {
             await interaction.editReply({ content: '❌ Only server owners can use this command.' });
