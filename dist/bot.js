@@ -67,7 +67,7 @@ class iRacingBot {
         const iracingUsername = interaction.options.getString('iracing_username', true);
         try {
             await this.db.addUser(interaction.user.id, iracingUsername, 123456);
-            await interaction.reply({ content: `✅ Linked ${interaction.user.id} to ${iracingUsername}`, ephemeral: true });
+            await interaction.reply({ content: `✅ Linked <@${interaction.user.id}> to ${iracingUsername}`, ephemeral: true });
         }
         catch (error) {
             console.error('Error linking account:', error);
