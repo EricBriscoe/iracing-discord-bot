@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const discord_js_1 = require("discord.js");
 const dotenv_1 = require("dotenv");
 const database_1 = require("./database");
+const iracing_client_1 = require("./iracing-client");
 (0, dotenv_1.config)();
 class iRacingBot {
     constructor() {
@@ -10,6 +11,7 @@ class iRacingBot {
             intents: [discord_js_1.GatewayIntentBits.Guilds]
         });
         this.db = new database_1.Database();
+        this.iracing = new iracing_client_1.iRacingClient();
         this.setupEventHandlers();
     }
     setupEventHandlers() {
@@ -66,8 +68,19 @@ class iRacingBot {
     async handleLinkCommand(interaction) {
         const iracingUsername = interaction.options.getString('iracing_username', true);
         try {
-            await this.db.addUser(interaction.user.id, iracingUsername, 123456);
-            await interaction.reply({ content: `✅ Linked <@${interaction.user.id}> to ${iracingUsername}`, ephemeral: true });
+            const customerId = await this.iracing.searchMember(iracingUsername);
+            if (!customerId) {
+                await interaction.reply({ content: `❌ Could not find iRacing user: ${iracingUsername}`, ephemeral: true });
+                return;
+            }
+            const memberData = await this.iracing.getMemberSummary(customerId);
+            if (!memberData) {
+                await interaction.reply({ content: `❌ Could not retrieve data for iRacing user: ${iracingUsername}`, ephemeral: true });
+                return;
+            }
+            await this.db.addUser(interaction.user.id, iracingUsername, customerId);
+            const response = `✅ Linked <@${interaction.user.id}> to **${memberData.display_name}** (ID: ${customerId})`;
+            await interaction.reply({ content: response, ephemeral: true });
         }
         catch (error) {
             console.error('Error linking account:', error);

@@ -1,12 +1,14 @@
 import { Client, GatewayIntentBits, SlashCommandBuilder, ChatInputCommandInteraction } from 'discord.js';
 import { config } from 'dotenv';
 import { Database } from './database';
+import { iRacingClient } from './iracing-client';
 
 config();
 
 class iRacingBot {
     private client: Client;
     private db: Database;
+    private iracing: iRacingClient;
 
     constructor() {
         this.client = new Client({
@@ -14,6 +16,7 @@ class iRacingBot {
         });
 
         this.db = new Database();
+        this.iracing = new iRacingClient();
         this.setupEventHandlers();
     }
 
@@ -75,8 +78,28 @@ class iRacingBot {
         const iracingUsername = interaction.options.getString('iracing_username', true);
         
         try {
-            await this.db.addUser(interaction.user.id, iracingUsername, 123456);
-            await interaction.reply({ content: `✅ Linked <@${interaction.user.id}> to ${iracingUsername}`, ephemeral: true });
+            // Search for the iRacing user
+            const customerId = await this.iracing.searchMember(iracingUsername);
+            
+            if (!customerId) {
+                await interaction.reply({ content: `❌ Could not find iRacing user: ${iracingUsername}`, ephemeral: true });
+                return;
+            }
+
+            // Get member summary to verify account exists
+            const memberData = await this.iracing.getMemberSummary(customerId);
+            if (!memberData) {
+                await interaction.reply({ content: `❌ Could not retrieve data for iRacing user: ${iracingUsername}`, ephemeral: true });
+                return;
+            }
+
+            // Save to database
+            await this.db.addUser(interaction.user.id, iracingUsername, customerId);
+            
+            // Create success response with user data
+            const response = `✅ Linked <@${interaction.user.id}> to **${memberData.display_name}** (ID: ${customerId})`;
+            
+            await interaction.reply({ content: response, ephemeral: true });
         } catch (error) {
             console.error('Error linking account:', error);
             await interaction.reply({ content: '❌ An error occurred while linking the account.', ephemeral: true });
