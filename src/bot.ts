@@ -61,10 +61,14 @@ class iRacingBot {
                 console.error('Error handling interaction:', error);
                 const errorMessage = 'An error occurred while processing your command.';
                 
-                if (interaction.replied || interaction.deferred) {
-                    await interaction.followUp({ content: errorMessage, ephemeral: true });
-                } else {
-                    await interaction.reply({ content: errorMessage, ephemeral: true });
+                try {
+                    if (interaction.replied || interaction.deferred) {
+                        await interaction.followUp({ content: errorMessage, ephemeral: true });
+                    } else {
+                        await interaction.reply({ content: errorMessage, ephemeral: true });
+                    }
+                } catch (replyError) {
+                    console.error('Failed to send error message to user:', replyError);
                 }
             }
         });
@@ -135,17 +139,19 @@ class iRacingBot {
             return;
         }
 
+        await interaction.deferReply({ ephemeral: true });
+
         try {
             const customerId = await this.iracing.searchMember(iracingUsername);
 
             if (!customerId) {
-                await interaction.reply({ content: `❌ Could not find iRacing user: ${iracingUsername}`, ephemeral: true });
+                await interaction.editReply({ content: `❌ Could not find iRacing user: ${iracingUsername}` });
                 return;
             }
 
             const memberData = await this.iracing.getMemberSummary(customerId);
             if (!memberData) {
-                await interaction.reply({ content: `❌ Could not retrieve data for iRacing user: ${iracingUsername}`, ephemeral: true });
+                await interaction.editReply({ content: `❌ Could not retrieve data for iRacing user: ${iracingUsername}` });
                 return;
             }
 
@@ -184,10 +190,10 @@ class iRacingBot {
                 }
             }
 
-            await interaction.reply({ embeds: [embed], ephemeral: true });
+            await interaction.editReply({ embeds: [embed] });
         } catch (error) {
             console.error('Error linking account:', error);
-            await interaction.reply({ content: '❌ An error occurred while linking the account. Please try again later.', ephemeral: true });
+            await interaction.editReply({ content: '❌ An error occurred while linking the account. Please try again later.' });
         }
     }
 
@@ -201,13 +207,15 @@ class iRacingBot {
             return;
         }
 
+        await interaction.deferReply({ ephemeral: true });
+
         try {
             const userData = await this.db.getUser(targetUser.id);
             if (!userData) {
                 const message = isAdminAction 
                     ? `❌ No iRacing account linked to <@${targetUser.id}>.`
                     : '❌ No iRacing account linked to your Discord account.';
-                await interaction.reply({ content: message, ephemeral: true });
+                await interaction.editReply({ content: message });
                 return;
             }
 
@@ -222,13 +230,13 @@ class iRacingBot {
                         { name: 'Previous iRacing User', value: userData[0], inline: true },
                         { name: 'Unlinked by', value: `<@${interaction.user.id}>`, inline: true }
                     );
-                await interaction.reply({ embeds: [embed] });
+                await interaction.editReply({ embeds: [embed] });
             } else {
-                await interaction.reply({ content: '✅ Successfully unlinked your iRacing account.', ephemeral: true });
+                await interaction.editReply({ content: '✅ Successfully unlinked your iRacing account.' });
             }
         } catch (error) {
             console.error('Error unlinking account:', error);
-            await interaction.reply({ content: '❌ An error occurred while unlinking the account.', ephemeral: true });
+            await interaction.editReply({ content: '❌ An error occurred while unlinking the account.' });
         }
     }
 
@@ -238,11 +246,13 @@ class iRacingBot {
             return;
         }
 
+        await interaction.deferReply({ ephemeral: true });
+
         try {
             const users = await this.db.getAllUsers();
 
             if (users.length === 0) {
-                await interaction.reply({ content: '❌ No linked accounts found.', ephemeral: true });
+                await interaction.editReply({ content: '❌ No linked accounts found.' });
                 return;
             }
 
@@ -260,10 +270,10 @@ class iRacingBot {
             embed.setDescription(linksText);
             embed.setFooter({ text: `Total: ${users.length} linked accounts` });
 
-            await interaction.reply({ embeds: [embed], ephemeral: true });
+            await interaction.editReply({ embeds: [embed] });
         } catch (error) {
             console.error('Error listing links:', error);
-            await interaction.reply({ content: '❌ An error occurred while listing linked accounts.', ephemeral: true });
+            await interaction.editReply({ content: '❌ An error occurred while listing linked accounts.' });
         }
     }
 
@@ -276,13 +286,15 @@ class iRacingBot {
         const channel = interaction.options.getChannel('channel') as TextChannel | null;
         const guildId = interaction.guildId!;
 
+        await interaction.deferReply({ ephemeral: true });
+
         try {
             const currentConfig = await this.db.getStatsChannel(guildId);
 
             if (!channel) {
                 // Disable stats channel
                 if (!currentConfig) {
-                    await interaction.reply({ content: '❌ No stats channel is currently configured for this server.', ephemeral: true });
+                    await interaction.editReply({ content: '❌ No stats channel is currently configured for this server.' });
                     return;
                 }
 
@@ -297,7 +309,7 @@ class iRacingBot {
                         { name: 'Disabled by', value: `<@${interaction.user.id}>`, inline: true }
                     );
 
-                await interaction.reply({ embeds: [embed] });
+                await interaction.editReply({ embeds: [embed] });
             } else {
                 // Set/change stats channel
                 await this.db.setStatsChannel(guildId, channel.id);
@@ -313,14 +325,14 @@ class iRacingBot {
                         { name: `${action} by`, value: `<@${interaction.user.id}>`, inline: true }
                     );
 
-                await interaction.reply({ embeds: [embed] });
+                await interaction.editReply({ embeds: [embed] });
 
                 // Trigger an immediate leaderboard update for this guild
                 this.updateGuildLeaderboard(guildId);
             }
         } catch (error) {
             console.error('Error toggling stats channel:', error);
-            await interaction.reply({ content: '❌ An error occurred while configuring the stats channel.', ephemeral: true });
+            await interaction.editReply({ content: '❌ An error occurred while configuring the stats channel.' });
         }
     }
 
