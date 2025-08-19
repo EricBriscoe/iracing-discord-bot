@@ -9,21 +9,28 @@
     "dev": "ts-node src/bot.ts",
     "clean": "rm -rf dist"
   },
-  "keywords": ["discord", "bot", "iracing", "typescript"],
+  "keywords": [
+    "discord",
+    "bot",
+    "iracing",
+    "typescript"
+  ],
   "author": "Eric Briscoe",
   "license": "MIT",
   "dependencies": {
+    "@types/cheerio": "^0.22.35",
+    "axios": "^1.6.2",
+    "cheerio": "^1.1.2",
     "discord.js": "^14.14.1",
     "dotenv": "^16.3.1",
-    "sqlite3": "^5.1.6",
-    "axios": "^1.6.2",
-    "node-cron": "^3.0.3"
+    "node-cron": "^3.0.3",
+    "sqlite3": "^5.1.6"
   },
   "devDependencies": {
     "@types/node": "^20.10.4",
-    "@types/sqlite3": "^3.1.11",
     "@types/node-cron": "^3.0.11",
-    "typescript": "^5.3.3",
-    "ts-node": "^10.9.1"
+    "@types/sqlite3": "^3.1.11",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.3.3"
   }
 }

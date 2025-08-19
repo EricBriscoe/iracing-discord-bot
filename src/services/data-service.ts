@@ -1,5 +1,5 @@
 import { Database, DriverData, LicenseSnapshot, RaceResult } from '../database';
-import { iRacingClient, MemberSummary, RecentRace } from '../iracing-client';
+import { NyoomClient, NyoomDriverData } from './nyoom-client';
 
 export interface StoredMemberData {
     driverData: DriverData;
@@ -16,12 +16,12 @@ export interface SearchResult {
 
 export class DataService {
     private db: Database;
-    private iracing: iRacingClient;
+    private nyoom: NyoomClient;
     private readonly UPDATE_INTERVAL_MINUTES = 15;
 
-    constructor(db: Database, iracing: iRacingClient) {
+    constructor(db: Database) {
         this.db = db;
-        this.iracing = iracing;
+        this.nyoom = new NyoomClient();
     }
 
     async findUserByDiscordId(discordId: string): Promise<SearchResult | null> {
@@ -39,17 +39,17 @@ export class DataService {
     }
 
     async findUserByIracingUsername(username: string): Promise<SearchResult | null> {
-        const customerId = await this.iracing.searchMember(username);
-        if (!customerId) return null;
+        const driverData = await this.nyoom.searchDriver(username);
+        if (!driverData) return null;
 
         // Check if this user is linked to a Discord account
         const allUsers = await this.db.getAllUsers();
-        const linkedUser = allUsers.find(([, , id]) => id === customerId);
+        const linkedUser = allUsers.find(([, , id]) => id === driverData.customerId);
 
         return {
             discordUserId: linkedUser?.[0],
             iracingUsername: username,
-            customerId
+            customerId: driverData.customerId
         };
     }
 
@@ -84,51 +84,73 @@ export class DataService {
         try {
             console.log(`Updating data for driver ${customerId}...`);
             
-            const [summary, recentRaces] = await Promise.all([
-                this.iracing.getMemberSummary(customerId),
-                this.iracing.getMemberRecentRaces(customerId)
-            ]);
+            // Get existing driver data to find the name for searching
+            const existingDriver = await this.db.getDriverData(customerId);
+            if (!existingDriver) {
+                console.warn(`No existing driver data found for ${customerId}`);
+                return;
+            }
 
-            if (!summary) {
-                console.warn(`Could not fetch summary for driver ${customerId}`);
+            const driverData = await this.nyoom.searchDriver(existingDriver.display_name);
+            if (!driverData) {
+                console.warn(`Could not fetch data for driver ${customerId} (${existingDriver.display_name})`);
                 return;
             }
 
             // Save driver basic info
-            await this.db.saveDriverData(customerId, summary.display_name);
+            await this.db.saveDriverData(customerId, driverData.name);
 
             // Save license snapshots
-            if (summary.licenses) {
-                for (const license of summary.licenses) {
-                    await this.db.saveLicenseSnapshot(
-                        customerId,
-                        license.category_id,
-                        license.license_level,
-                        license.safety_rating,
-                        license.irating
-                    );
-                }
+            for (const license of driverData.licenses) {
+                const categoryId = this.mapCategoryNameToId(license.category);
+                const licenseLevel = this.mapLicenseLevelToNumber(license.level);
+                
+                await this.db.saveLicenseSnapshot(
+                    customerId,
+                    categoryId,
+                    licenseLevel,
+                    license.safetyRating,
+                    license.irating
+                );
             }
 
             // Save race results
-            if (recentRaces) {
-                for (const race of recentRaces) {
-                    await this.db.saveRaceResult(
-                        customerId,
-                        race.subsession_id,
-                        race.series_name,
-                        race.track.track_name,
-                        race.start_time,
-                        race.finish_position,
-                        race.incidents
-                    );
-                }
+            for (const race of driverData.recentResults) {
+                await this.db.saveRaceResult(
+                    customerId,
+                    Math.floor(Math.random() * 1000000), // Generate subsession ID
+                    race.series,
+                    race.track,
+                    race.date,
+                    race.position,
+                    race.incidents
+                );
             }
 
-            console.log(`Updated data for driver ${customerId} (${summary.display_name})`);
+            console.log(`Updated data for driver ${customerId} (${driverData.name})`);
         } catch (error) {
             console.error(`Error updating driver data for ${customerId}:`, error);
         }
+    }
+
+    private mapCategoryNameToId(category: string): number {
+        const categoryMap: { [key: string]: number } = {
+            'Oval': 1,
+            'Road': 2,
+            'Dirt Oval': 3,
+            'Dirt Road': 4
+        };
+        return categoryMap[category] || 2; // Default to Road
+    }
+
+    private mapLicenseLevelToNumber(level: string): number {
+        const levelMap: { [key: string]: number } = {
+            'A': 0,
+            'B': 1,
+            'C': 2,
+            'D': 3
+        };
+        return levelMap[level] || 3; // Default to D
     }
 
     async searchAndLoadUser(searchTerm: string, loadData = false): Promise<SearchResult | null> {
@@ -142,6 +164,21 @@ export class DataService {
         // If not found, try as iRacing username
         if (!result) {
             result = await this.findUserByIracingUsername(searchTerm);
+        }
+
+        // If still not found, search directly and create new data
+        if (!result) {
+            const driverData = await this.nyoom.searchDriver(searchTerm);
+            if (driverData) {
+                // Save new driver data
+                await this.db.saveDriverData(driverData.customerId, driverData.name);
+                
+                // Create result
+                result = {
+                    iracingUsername: searchTerm,
+                    customerId: driverData.customerId
+                };
+            }
         }
 
         // Lazy load member data if requested

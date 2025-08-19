@@ -3,7 +3,6 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const discord_js_1 = require("discord.js");
 const dotenv_1 = require("dotenv");
 const database_1 = require("./database");
-const iracing_client_1 = require("./iracing-client");
 const data_service_1 = require("./services/data-service");
 const command_handler_1 = require("./services/command-handler");
 const background_updater_1 = require("./services/background-updater");
@@ -14,8 +13,7 @@ class iRacingBot {
             intents: [discord_js_1.GatewayIntentBits.Guilds]
         });
         this.db = new database_1.Database();
-        this.iracing = new iracing_client_1.iRacingClient();
-        this.dataService = new data_service_1.DataService(this.db, this.iracing);
+        this.dataService = new data_service_1.DataService(this.db);
         this.commandHandler = new command_handler_1.CommandHandler(this.dataService);
         this.backgroundUpdater = new background_updater_1.BackgroundUpdater(this.dataService);
         this.setupEventHandlers();
@@ -86,23 +84,20 @@ class iRacingBot {
     async handleLinkCommand(interaction) {
         const iracingName = interaction.options.getString('iracing_name', true);
         try {
-            const customerId = await this.iracing.searchMember(iracingName);
-            if (!customerId) {
-                await interaction.reply({ content: `❌ Could not find iRacing driver: ${iracingName}`, ephemeral: true });
+            await interaction.deferReply({ ephemeral: true });
+            const driverData = await this.dataService.findUserByIracingUsername(iracingName);
+            if (!driverData) {
+                await interaction.editReply({ content: `❌ Could not find iRacing driver: ${iracingName}` });
                 return;
             }
-            const memberData = await this.iracing.getMemberSummary(customerId);
-            if (!memberData) {
-                await interaction.reply({ content: `❌ Could not retrieve data for iRacing driver: ${iracingName}`, ephemeral: true });
-                return;
-            }
-            await this.db.addUser(interaction.user.id, iracingName, customerId);
-            const response = `✅ Linked <@${interaction.user.id}> to **${memberData.display_name}** (ID: ${customerId})`;
-            await interaction.reply({ content: response, ephemeral: true });
+            await this.db.addUser(interaction.user.id, iracingName, driverData.customerId);
+            await this.db.saveDriverData(driverData.customerId, iracingName);
+            const response = `✅ Linked <@${interaction.user.id}> to **${iracingName}** (ID: ${driverData.customerId})`;
+            await interaction.editReply({ content: response });
         }
         catch (error) {
             console.error('Error linking account:', error);
-            await interaction.reply({ content: '❌ An error occurred while linking the account.', ephemeral: true });
+            await interaction.editReply({ content: '❌ An error occurred while linking the account.' });
         }
     }
     async handleUnlinkCommand(interaction) {

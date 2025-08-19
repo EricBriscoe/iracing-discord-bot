@@ -1,7 +1,6 @@
 import { Client, GatewayIntentBits, SlashCommandBuilder, ChatInputCommandInteraction } from 'discord.js';
 import { config } from 'dotenv';
 import { Database } from './database';
-import { iRacingClient } from './iracing-client';
 import { DataService } from './services/data-service';
 import { CommandHandler } from './services/command-handler';
 import { BackgroundUpdater } from './services/background-updater';
@@ -11,7 +10,6 @@ config();
 class iRacingBot {
     private client: Client;
     private db: Database;
-    private iracing: iRacingClient;
     private dataService: DataService;
     private commandHandler: CommandHandler;
     private backgroundUpdater: BackgroundUpdater;
@@ -22,8 +20,7 @@ class iRacingBot {
         });
 
         this.db = new Database();
-        this.iracing = new iRacingClient();
-        this.dataService = new DataService(this.db, this.iracing);
+        this.dataService = new DataService(this.db);
         this.commandHandler = new CommandHandler(this.dataService);
         this.backgroundUpdater = new BackgroundUpdater(this.dataService);
         this.setupEventHandlers();
@@ -103,31 +100,27 @@ class iRacingBot {
         const iracingName = interaction.options.getString('iracing_name', true);
         
         try {
-            // Search for the iRacing user
-            const customerId = await this.iracing.searchMember(iracingName);
+            await interaction.deferReply({ ephemeral: true });
             
-            if (!customerId) {
-                await interaction.reply({ content: `❌ Could not find iRacing driver: ${iracingName}`, ephemeral: true });
+            // Search for the driver using nyoom.app
+            const driverData = await this.dataService.findUserByIracingUsername(iracingName);
+            
+            if (!driverData) {
+                await interaction.editReply({ content: `❌ Could not find iRacing driver: ${iracingName}` });
                 return;
             }
 
-            // Get member summary to verify account exists
-            const memberData = await this.iracing.getMemberSummary(customerId);
-            if (!memberData) {
-                await interaction.reply({ content: `❌ Could not retrieve data for iRacing driver: ${iracingName}`, ephemeral: true });
-                return;
-            }
-
-            // Save to database
-            await this.db.addUser(interaction.user.id, iracingName, customerId);
+            // Save to database and update driver data
+            await this.db.addUser(interaction.user.id, iracingName, driverData.customerId);
+            await this.db.saveDriverData(driverData.customerId, iracingName);
             
-            // Create success response with user data
-            const response = `✅ Linked <@${interaction.user.id}> to **${memberData.display_name}** (ID: ${customerId})`;
+            // Create success response
+            const response = `✅ Linked <@${interaction.user.id}> to **${iracingName}** (ID: ${driverData.customerId})`;
             
-            await interaction.reply({ content: response, ephemeral: true });
+            await interaction.editReply({ content: response });
         } catch (error) {
             console.error('Error linking account:', error);
-            await interaction.reply({ content: '❌ An error occurred while linking the account.', ephemeral: true });
+            await interaction.editReply({ content: '❌ An error occurred while linking the account.' });
         }
     }
 
