@@ -4,6 +4,9 @@ const discord_js_1 = require("discord.js");
 const dotenv_1 = require("dotenv");
 const database_1 = require("./database");
 const iracing_client_1 = require("./iracing-client");
+const data_service_1 = require("./services/data-service");
+const command_handler_1 = require("./services/command-handler");
+const background_updater_1 = require("./services/background-updater");
 (0, dotenv_1.config)();
 class iRacingBot {
     constructor() {
@@ -12,6 +15,9 @@ class iRacingBot {
         });
         this.db = new database_1.Database();
         this.iracing = new iracing_client_1.iRacingClient();
+        this.dataService = new data_service_1.DataService(this.db, this.iracing);
+        this.commandHandler = new command_handler_1.CommandHandler(this.dataService);
+        this.backgroundUpdater = new background_updater_1.BackgroundUpdater(this.dataService);
         this.setupEventHandlers();
     }
     setupEventHandlers() {
@@ -19,6 +25,9 @@ class iRacingBot {
             console.log(`${this.client.user?.tag} has connected to Discord!`);
             await this.db.initDb();
             await this.registerSlashCommands();
+            setTimeout(() => {
+                this.backgroundUpdater.start();
+            }, 30000);
         });
         this.client.on('interactionCreate', async (interaction) => {
             if (!interaction.isChatInputCommand())
@@ -30,6 +39,9 @@ class iRacingBot {
                         break;
                     case 'unlink':
                         await this.handleUnlinkCommand(interaction);
+                        break;
+                    case 'search':
+                        await this.commandHandler.handleSearchCommand(interaction);
                         break;
                 }
             }
@@ -49,12 +61,18 @@ class iRacingBot {
             new discord_js_1.SlashCommandBuilder()
                 .setName('link')
                 .setDescription('Link an iRacing account')
-                .addStringOption(option => option.setName('iracing_username')
-                .setDescription('The iRacing username')
+                .addStringOption(option => option.setName('iracing_name')
+                .setDescription('Your iRacing full name or display name')
                 .setRequired(true)),
             new discord_js_1.SlashCommandBuilder()
                 .setName('unlink')
-                .setDescription('Unlink your iRacing account')
+                .setDescription('Unlink your iRacing account'),
+            new discord_js_1.SlashCommandBuilder()
+                .setName('search')
+                .setDescription('Search for iRacing driver information')
+                .addStringOption(option => option.setName('driver')
+                .setDescription('iRacing full name or Discord user ID (defaults to your linked account)')
+                .setRequired(false))
         ];
         try {
             console.log('Registering slash commands...');
@@ -66,19 +84,19 @@ class iRacingBot {
         }
     }
     async handleLinkCommand(interaction) {
-        const iracingUsername = interaction.options.getString('iracing_username', true);
+        const iracingName = interaction.options.getString('iracing_name', true);
         try {
-            const customerId = await this.iracing.searchMember(iracingUsername);
+            const customerId = await this.iracing.searchMember(iracingName);
             if (!customerId) {
-                await interaction.reply({ content: `❌ Could not find iRacing user: ${iracingUsername}`, ephemeral: true });
+                await interaction.reply({ content: `❌ Could not find iRacing driver: ${iracingName}`, ephemeral: true });
                 return;
             }
             const memberData = await this.iracing.getMemberSummary(customerId);
             if (!memberData) {
-                await interaction.reply({ content: `❌ Could not retrieve data for iRacing user: ${iracingUsername}`, ephemeral: true });
+                await interaction.reply({ content: `❌ Could not retrieve data for iRacing driver: ${iracingName}`, ephemeral: true });
                 return;
             }
-            await this.db.addUser(interaction.user.id, iracingUsername, customerId);
+            await this.db.addUser(interaction.user.id, iracingName, customerId);
             const response = `✅ Linked <@${interaction.user.id}> to **${memberData.display_name}** (ID: ${customerId})`;
             await interaction.reply({ content: response, ephemeral: true });
         }
@@ -105,6 +123,7 @@ class iRacingBot {
         await this.client.login(token);
     }
     async stop() {
+        this.backgroundUpdater.stop();
         this.db.close();
         await this.client.destroy();
     }

@@ -2,6 +2,9 @@ import { Client, GatewayIntentBits, SlashCommandBuilder, ChatInputCommandInterac
 import { config } from 'dotenv';
 import { Database } from './database';
 import { iRacingClient } from './iracing-client';
+import { DataService } from './services/data-service';
+import { CommandHandler } from './services/command-handler';
+import { BackgroundUpdater } from './services/background-updater';
 
 config();
 
@@ -9,6 +12,9 @@ class iRacingBot {
     private client: Client;
     private db: Database;
     private iracing: iRacingClient;
+    private dataService: DataService;
+    private commandHandler: CommandHandler;
+    private backgroundUpdater: BackgroundUpdater;
 
     constructor() {
         this.client = new Client({
@@ -17,6 +23,9 @@ class iRacingBot {
 
         this.db = new Database();
         this.iracing = new iRacingClient();
+        this.dataService = new DataService(this.db, this.iracing);
+        this.commandHandler = new CommandHandler(this.dataService);
+        this.backgroundUpdater = new BackgroundUpdater(this.dataService);
         this.setupEventHandlers();
     }
 
@@ -25,6 +34,11 @@ class iRacingBot {
             console.log(`${this.client.user?.tag} has connected to Discord!`);
             await this.db.initDb();
             await this.registerSlashCommands();
+            
+            // Start background updater after a short delay
+            setTimeout(() => {
+                this.backgroundUpdater.start();
+            }, 30000); // Start after 30 seconds
         });
 
         this.client.on('interactionCreate', async (interaction) => {
@@ -37,6 +51,9 @@ class iRacingBot {
                         break;
                     case 'unlink':
                         await this.handleUnlinkCommand(interaction);
+                        break;
+                    case 'search':
+                        await this.commandHandler.handleSearchCommand(interaction);
                         break;
                 }
             } catch (error) {
@@ -56,13 +73,21 @@ class iRacingBot {
                 .setName('link')
                 .setDescription('Link an iRacing account')
                 .addStringOption(option =>
-                    option.setName('iracing_username')
-                        .setDescription('The iRacing username')
+                    option.setName('iracing_name')
+                        .setDescription('Your iRacing full name or display name')
                         .setRequired(true)),
 
             new SlashCommandBuilder()
                 .setName('unlink')
-                .setDescription('Unlink your iRacing account')
+                .setDescription('Unlink your iRacing account'),
+
+            new SlashCommandBuilder()
+                .setName('search')
+                .setDescription('Search for iRacing driver information')
+                .addStringOption(option =>
+                    option.setName('driver')
+                        .setDescription('iRacing full name or Discord user ID (defaults to your linked account)')
+                        .setRequired(false))
         ];
 
         try {
@@ -75,26 +100,26 @@ class iRacingBot {
     }
 
     private async handleLinkCommand(interaction: ChatInputCommandInteraction): Promise<void> {
-        const iracingUsername = interaction.options.getString('iracing_username', true);
+        const iracingName = interaction.options.getString('iracing_name', true);
         
         try {
             // Search for the iRacing user
-            const customerId = await this.iracing.searchMember(iracingUsername);
+            const customerId = await this.iracing.searchMember(iracingName);
             
             if (!customerId) {
-                await interaction.reply({ content: `❌ Could not find iRacing user: ${iracingUsername}`, ephemeral: true });
+                await interaction.reply({ content: `❌ Could not find iRacing driver: ${iracingName}`, ephemeral: true });
                 return;
             }
 
             // Get member summary to verify account exists
             const memberData = await this.iracing.getMemberSummary(customerId);
             if (!memberData) {
-                await interaction.reply({ content: `❌ Could not retrieve data for iRacing user: ${iracingUsername}`, ephemeral: true });
+                await interaction.reply({ content: `❌ Could not retrieve data for iRacing driver: ${iracingName}`, ephemeral: true });
                 return;
             }
 
             // Save to database
-            await this.db.addUser(interaction.user.id, iracingUsername, customerId);
+            await this.db.addUser(interaction.user.id, iracingName, customerId);
             
             // Create success response with user data
             const response = `✅ Linked <@${interaction.user.id}> to **${memberData.display_name}** (ID: ${customerId})`;
@@ -126,6 +151,7 @@ class iRacingBot {
     }
 
     async stop(): Promise<void> {
+        this.backgroundUpdater.stop();
         this.db.close();
         await this.client.destroy();
     }
