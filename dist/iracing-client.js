@@ -5,12 +5,18 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.iRacingClient = void 0;
 const axios_1 = __importDefault(require("axios"));
+const crypto_1 = require("crypto");
 class iRacingClient {
     constructor() {
         this.authCookie = null;
         this.loginPromise = null;
         this.username = process.env.IRACING_USERNAME || '';
-        this.password = process.env.IRACING_PASSWORD || '';
+        if (process.env.IRACING_HASHWORD) {
+            this.password = process.env.IRACING_HASHWORD;
+        }
+        else {
+            this.password = process.env.IRACING_PASSWORD || '';
+        }
         if (!this.username || !this.password) {
             throw new Error('iRacing credentials not configured');
         }
@@ -32,15 +38,34 @@ class iRacingClient {
     }
     async _performLogin() {
         try {
+            let passwordToSend;
+            if (process.env.IRACING_HASHWORD) {
+                passwordToSend = this.password;
+            }
+            else {
+                passwordToSend = (0, crypto_1.createHash)('sha256')
+                    .update(this.password + this.username.toLowerCase())
+                    .digest('base64');
+            }
             const response = await this.client.post('/auth', {
                 email: this.username,
-                password: this.password
+                password: passwordToSend
             });
             const cookies = response.headers['set-cookie'];
+            let cookieHeader = '';
             if (cookies) {
-                this.authCookie = cookies.find(cookie => cookie.startsWith('irsso_membersitev2='))?.split(';')[0] || null;
+                const relevantCookies = cookies
+                    .filter(cookie => cookie.startsWith('irsso_membersv2=') || cookie.startsWith('authtoken_members='))
+                    .map(cookie => cookie.split(';')[0]);
+                cookieHeader = relevantCookies.join('; ');
             }
-            if (!this.authCookie) {
+            if (response.data && response.data.authcode) {
+                this.authCookie = cookieHeader;
+            }
+            else if (cookieHeader) {
+                this.authCookie = cookieHeader;
+            }
+            else {
                 throw new Error('Failed to obtain authentication cookie');
             }
             this.client.defaults.headers.Cookie = this.authCookie;
@@ -82,12 +107,26 @@ class iRacingClient {
     async getMemberSummary(customerId) {
         try {
             await this.ensureAuthenticated();
-            const response = await this.client.get('/data/stats/member_summary', {
+            const response = await this.client.get('/data/member/get', {
                 params: {
-                    cust_id: customerId
+                    cust_ids: customerId
                 }
             });
-            return response.data;
+            if (response.data.link) {
+                console.log('Fetching data from S3 link:', response.data.link);
+                const s3Response = await this.client.get(response.data.link);
+                const memberResponse = s3Response.data;
+                if (memberResponse.success && memberResponse.members && memberResponse.members.length > 0) {
+                    return memberResponse.members[0] || null;
+                }
+            }
+            else {
+                const memberResponse = response.data;
+                if (memberResponse.success && memberResponse.members && memberResponse.members.length > 0) {
+                    return memberResponse.members[0] || null;
+                }
+            }
+            return null;
         }
         catch (error) {
             console.error(`Error fetching member summary for ${customerId}:`, error);
@@ -106,6 +145,112 @@ class iRacingClient {
         }
         catch (error) {
             console.error(`Error fetching recent races for ${customerId}:`, error);
+            return null;
+        }
+    }
+    async getSeries() {
+        try {
+            await this.ensureAuthenticated();
+            const response = await this.client.get('/data/series/get');
+            if (response.data.link) {
+                console.log('Fetching series data from S3 link');
+                const s3Response = await this.client.get(response.data.link);
+                return s3Response.data;
+            }
+            else {
+                return response.data;
+            }
+        }
+        catch (error) {
+            console.error('Error fetching series data:', error);
+            return null;
+        }
+    }
+    async getOfficialSeries() {
+        const allSeries = await this.getSeries();
+        if (!allSeries)
+            return null;
+        return allSeries.filter(series => series.eligible &&
+            series.allowed_licenses.length > 0 &&
+            !series.series_name.toLowerCase().includes('hosted') &&
+            !series.series_name.toLowerCase().includes('league'));
+    }
+    async getMemberBestLapTimes(customerId, carId) {
+        try {
+            await this.ensureAuthenticated();
+            const params = { cust_id: customerId };
+            if (carId)
+                params.car_id = carId;
+            const response = await this.client.get('/data/stats/member_bests', { params });
+            if (response.data.link) {
+                console.log('Fetching member bests from S3 link');
+                const s3Response = await this.client.get(response.data.link);
+                return s3Response.data;
+            }
+            else {
+                return response.data;
+            }
+        }
+        catch (error) {
+            console.error(`Error fetching member best lap times for ${customerId}:`, error);
+            return null;
+        }
+    }
+    formatLapTime(tenThousandths) {
+        const totalSeconds = tenThousandths / 10000;
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = (totalSeconds % 60).toFixed(3);
+        return `${minutes}:${seconds.padStart(6, '0')}`;
+    }
+    async getMemberBestForTrack(customerId, trackId, carId) {
+        const memberBests = await this.getMemberBestLapTimes(customerId, carId);
+        if (!memberBests)
+            return [];
+        return memberBests.bests.filter(best => best.track.track_id === trackId);
+    }
+    async getSeriesSeasons(seriesId) {
+        try {
+            await this.ensureAuthenticated();
+            const response = await this.client.get('/data/series/seasons', {
+                params: {
+                    series_id: seriesId,
+                    include_series: true
+                }
+            });
+            if (response.data.link) {
+                console.log('Fetching series seasons from S3 link');
+                const s3Response = await this.client.get(response.data.link);
+                return s3Response.data;
+            }
+            else {
+                return response.data;
+            }
+        }
+        catch (error) {
+            console.error(`Error fetching series seasons for ${seriesId}:`, error);
+            return null;
+        }
+    }
+    async getCurrentSeriesSchedule(seriesId) {
+        try {
+            await this.ensureAuthenticated();
+            const response = await this.client.get('/data/series/race_guide', {
+                params: {
+                    series_id: seriesId,
+                    include_end_after_time: true
+                }
+            });
+            if (response.data.link) {
+                console.log('Fetching series schedule from S3 link');
+                const s3Response = await this.client.get(response.data.link);
+                return s3Response.data;
+            }
+            else {
+                return response.data;
+            }
+        }
+        catch (error) {
+            console.error(`Error fetching series schedule for ${seriesId}:`, error);
             return null;
         }
     }

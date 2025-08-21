@@ -1,65 +1,66 @@
-export interface User {
+export interface UserLink {
     discord_id: string;
     iracing_username: string;
     iracing_customer_id: number | null;
     created_at: string;
 }
-export interface GuildConfig {
-    guild_id: string;
-    stats_channel_id: string | null;
-    stats_message_id: string | null;
-    created_at: string;
-    updated_at: string;
-}
-export interface DriverData {
-    customer_id: number;
-    display_name: string;
-    recorded_at: string;
-}
-export interface LicenseSnapshot {
-    id: number;
-    customer_id: number;
-    category_id: number;
-    license_level: number;
-    safety_rating: number;
-    irating: number;
-    recorded_at: string;
-}
-export interface RaceResult {
-    id: number;
-    customer_id: number;
-    subsession_id: number;
+export interface OfficialSeries {
+    series_id: number;
     series_name: string;
+    series_short_name: string;
+    category: string;
+    category_id: number;
+    last_updated: string;
+}
+export interface ChannelTrack {
+    channel_id: string;
+    guild_id: string;
+    series_id: number;
+    series_name: string;
+    created_at: string;
+}
+export interface TrackCarCombo {
+    id?: number;
+    series_id: number;
+    track_id: number;
+    car_id: number;
     track_name: string;
-    start_time: string;
-    finish_position: number;
-    incidents: number;
+    config_name: string;
+    car_name: string;
+    last_updated: string;
+}
+export interface LapTimeRecord {
+    id?: number;
+    combo_id: number;
+    discord_id: string;
+    iracing_customer_id: number;
+    iracing_username: string;
+    lap_time_microseconds: number;
+    subsession_id: number;
+    event_type: string;
     recorded_at: string;
+    last_updated: string;
 }
 export declare class Database {
     private db;
     private dbPath;
     constructor(dbPath?: string);
     initDb(): Promise<void>;
-    addUser(discordId: string, iracingUsername: string, iracingCustomerId?: number): Promise<void>;
-    getUser(discordId: string): Promise<[string, number | null] | null>;
-    getAllUsers(): Promise<[string, string, number | null][]>;
-    removeUser(discordId: string): Promise<void>;
-    setStatsChannel(guildId: string, channelId: string): Promise<void>;
-    getStatsChannel(guildId: string): Promise<[string, string | null] | null>;
-    updateStatsMessageId(guildId: string, messageId: string | null): Promise<void>;
-    removeStatsChannel(guildId: string): Promise<void>;
-    getAllGuildConfigs(): Promise<[string, string, string | null][]>;
-    saveDriverData(customerId: number, displayName: string): Promise<void>;
-    saveLicenseSnapshot(customerId: number, categoryId: number, licenseLevel: number, safetyRating: number, irating: number): Promise<void>;
-    saveRaceResult(customerId: number, subsessionId: number, seriesName: string, trackName: string, startTime: string, finishPosition: number, incidents: number): Promise<void>;
-    getDriverData(customerId: number): Promise<DriverData | null>;
-    getLatestLicenseSnapshots(customerId: number): Promise<LicenseSnapshot[]>;
-    getLicenseHistory(customerId: number, categoryId: number, limit?: number): Promise<LicenseSnapshot[]>;
-    getRecentRaces(customerId: number, limit?: number): Promise<RaceResult[]>;
-    needsDataUpdate(customerId: number, maxAgeMinutes?: number): Promise<boolean>;
-    getAllDriverData(): Promise<DriverData[]>;
-    getOldestDriver(): Promise<DriverData | null>;
+    linkUser(discordId: string, iracingUsername: string, iracingCustomerId?: number): Promise<void>;
+    getLinkedUser(discordId: string): Promise<UserLink | null>;
+    unlinkUser(discordId: string): Promise<boolean>;
+    getAllLinkedUsers(): Promise<UserLink[]>;
+    updateOfficialSeries(seriesList: OfficialSeries[]): Promise<void>;
+    getOfficialSeries(): Promise<OfficialSeries[]>;
+    setChannelTrack(channelId: string, guildId: string, seriesId: number, seriesName: string): Promise<void>;
+    getChannelTrack(channelId: string): Promise<ChannelTrack | null>;
+    removeChannelTrack(channelId: string): Promise<boolean>;
+    getGuildLinkedUsers(guildId: string): Promise<UserLink[]>;
+    getAllChannelTracks(): Promise<ChannelTrack[]>;
+    upsertTrackCarCombo(combo: TrackCarCombo): Promise<number>;
+    getTrackCarCombosBySeriesId(seriesId: number): Promise<TrackCarCombo[]>;
+    upsertLapTimeRecord(record: LapTimeRecord): Promise<void>;
+    getTopLapTimesForCombo(comboId: number, limit?: number): Promise<LapTimeRecord[]>;
     close(): void;
 }
 //# sourceMappingURL=database.d.ts.map

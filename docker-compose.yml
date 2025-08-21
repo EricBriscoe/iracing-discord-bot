@@ -1,11 +1,10 @@
-version: '3.8'
-
 services:
   bot:
     build: .
     environment:
-      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - DISCORD_TOKEN=${IRACING_DISCORD_TOKEN}
       - IRACING_USERNAME=${IRACING_USERNAME}
+      - IRACING_HASHWORD=${IRACING_HASHWORD}
       - IRACING_PASSWORD=${IRACING_PASSWORD}
     volumes:
       - ./data:/app/data

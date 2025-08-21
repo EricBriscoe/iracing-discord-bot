@@ -75,7 +75,7 @@ jspm_packages/
 
 # Nuxt.js build / generate output
 .nuxt
-dist
+dist/
 
 # Gatsby files
 .cache/
@@ -149,3 +149,8 @@ coverage.xml
 # Discord bot specific
 config.json
 token.txt
+cookies.txt
+
+# iRacing data files
+*.json.map
+*.js.map
