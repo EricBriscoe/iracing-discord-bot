@@ -392,7 +392,7 @@ export class iRacingClient {
         try {
             await this.ensureAuthenticated();
             
-            const response = await this.client.get('/data/series/race_guide', {
+            const response = await this.client.get('/data/season/race_guide', {
                 params: {
                     series_id: seriesId,
                     include_end_after_time: true

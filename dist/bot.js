@@ -37,6 +37,9 @@ class iRacingBot {
                         case 'track':
                             await this.handleTrackCommand(interaction);
                             break;
+                        case 'untrack':
+                            await this.handleUntrackCommand(interaction);
+                            break;
                     }
                 }
                 catch (error) {
@@ -81,7 +84,10 @@ class iRacingBot {
                 .addStringOption(option => option.setName('series')
                 .setDescription('Select an official iRacing series')
                 .setRequired(true)
-                .setAutocomplete(true))
+                .setAutocomplete(true)),
+            new discord_js_1.SlashCommandBuilder()
+                .setName('untrack')
+                .setDescription('Remove series tracking from this channel')
         ];
         try {
             console.log('Registering slash commands...');
@@ -148,6 +154,47 @@ class iRacingBot {
         catch (error) {
             console.error('Error unlinking account:', error);
             await interaction.reply({ content: '❌ An error occurred while unlinking the account.', flags: [discord_js_1.MessageFlags.Ephemeral] });
+        }
+    }
+    async handleUntrackCommand(interaction) {
+        try {
+            await interaction.deferReply();
+            if (!interaction.channel) {
+                await interaction.editReply({ content: '❌ This command must be used in a channel.' });
+                return;
+            }
+            const channelTrack = await this.db.getChannelTrack(interaction.channel.id);
+            if (!channelTrack) {
+                await interaction.editReply({ content: '❌ This channel is not currently tracking any series.' });
+                return;
+            }
+            const wasRemoved = await this.db.removeChannelTrack(interaction.channel.id);
+            if (wasRemoved) {
+                if (interaction.channel instanceof discord_js_1.TextChannel) {
+                    try {
+                        console.log(`Clearing messages in channel ${interaction.channel.name} after untracking`);
+                        const messages = await interaction.channel.messages.fetch({ limit: 100 });
+                        const messagesToDelete = messages.filter(msg => !msg.pinned && msg.id !== interaction.id);
+                        if (messagesToDelete.size > 0) {
+                            await interaction.channel.bulkDelete(messagesToDelete, true);
+                            console.log(`Deleted ${messagesToDelete.size} messages from untracked channel`);
+                        }
+                    }
+                    catch (error) {
+                        console.error('Error clearing channel messages:', error);
+                    }
+                }
+                await interaction.editReply({
+                    content: `✅ Removed series tracking from this channel.\n\n**${channelTrack.series_name}** is no longer being tracked here. All leaderboard messages have been cleared.`
+                });
+            }
+            else {
+                await interaction.editReply({ content: '❌ Failed to remove channel tracking.' });
+            }
+        }
+        catch (error) {
+            console.error('Error removing channel track:', error);
+            await interaction.editReply({ content: '❌ An error occurred while removing channel tracking.' });
         }
     }
     async start() {
@@ -257,52 +304,60 @@ class iRacingBot {
         }
     }
     async updateChannelWithCommonCombos(channelTrack) {
-        const commonCombos = [
-            {
-                track_id: 467,
-                track_name: 'Virginia International Raceway',
-                config_name: 'North Course',
-                car_id: 195,
-                car_name: 'BMW M2 CS Racing'
-            },
-            {
-                track_id: 324,
-                track_name: 'Tsukuba Circuit',
-                config_name: '2000 Full',
-                car_id: 195,
-                car_name: 'BMW M2 CS Racing'
-            },
-            {
-                track_id: 324,
-                track_name: 'Tsukuba Circuit',
-                config_name: '2000 Full',
-                car_id: 67,
-                car_name: 'Global Mazda MX-5 Cup'
+        try {
+            const schedule = await this.iracing.getCurrentSeriesSchedule(channelTrack.series_id);
+            const seriesInfo = await this.iracing.getSeries();
+            if (!schedule || !seriesInfo) {
+                console.log(`No schedule data available for series ${channelTrack.series_id}`);
+                return;
             }
-        ];
-        const leaderboards = [];
-        for (const combo of commonCombos) {
-            const comboData = {
-                series_id: channelTrack.series_id,
-                track_id: combo.track_id,
-                car_id: combo.car_id,
-                track_name: combo.track_name,
-                config_name: combo.config_name,
-                car_name: combo.car_name,
-                last_updated: new Date().toISOString()
-            };
-            const comboId = await this.db.upsertTrackCarCombo(comboData);
-            await this.updateLapTimesForCombo(comboId, comboData);
-            const topTimes = await this.db.getTopLapTimesForCombo(comboId, 10);
-            if (topTimes.length > 0) {
-                leaderboards.push({
-                    combo: comboData,
-                    times: topTimes
-                });
+            const currentSeries = seriesInfo.find(s => s.series_id === channelTrack.series_id);
+            if (!currentSeries || !currentSeries.cars || currentSeries.cars.length === 0) {
+                console.log(`No car data available for series ${channelTrack.series_id}`);
+                return;
+            }
+            const leaderboards = [];
+            const processedCombos = new Set();
+            if (schedule.sessions && schedule.sessions.length > 0) {
+                const recentSessions = schedule.sessions.slice(0, 5);
+                for (const session of recentSessions) {
+                    if (session.track && session.track.track_id) {
+                        for (const car of currentSeries.cars) {
+                            const comboKey = `${session.track.track_id}-${car.car_id}`;
+                            if (!processedCombos.has(comboKey)) {
+                                processedCombos.add(comboKey);
+                                const comboData = {
+                                    series_id: channelTrack.series_id,
+                                    track_id: session.track.track_id,
+                                    car_id: car.car_id,
+                                    track_name: session.track.track_name,
+                                    config_name: session.track.config_name || 'Full Course',
+                                    car_name: car.car_name,
+                                    last_updated: new Date().toISOString()
+                                };
+                                const comboId = await this.db.upsertTrackCarCombo(comboData);
+                                await this.updateLapTimesForCombo(comboId, comboData);
+                                const topTimes = await this.db.getTopLapTimesForCombo(comboId, 10);
+                                if (topTimes.length > 0) {
+                                    leaderboards.push({
+                                        combo: comboData,
+                                        times: topTimes
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (leaderboards.length > 0) {
+                await this.updateChannelMessages(channelTrack.channel_id, leaderboards);
+            }
+            else {
+                console.log(`No lap time data available for series ${channelTrack.series_name}`);
             }
         }
-        if (leaderboards.length > 0) {
-            await this.updateChannelMessages(channelTrack.channel_id, leaderboards);
+        catch (error) {
+            console.error(`Error updating channel with series-specific combos for ${channelTrack.series_name}:`, error);
         }
     }
     async updateChannelMessages(channelId, leaderboards) {
@@ -364,9 +419,10 @@ class iRacingBot {
             const position = index + 1;
             const emoji = position === 1 ? '🥇' : position === 2 ? '🥈' : position === 3 ? '🥉' : '🏁';
             const lapTime = this.iracing.formatLapTime(record.lap_time_microseconds);
-            leaderboard += `${emoji} **${position}.** ${record.iracing_username} - \`${lapTime}\`\n`;
+            leaderboard += `${emoji} **${position}.** <@${record.discord_id}> - \`${lapTime}\`\n`;
         });
-        leaderboard += `\n*Last updated: ${new Date().toLocaleString()}*`;
+        const timestamp = Math.floor(Date.now() / 1000);
+        leaderboard += `\n*Last updated: <t:${timestamp}:R>*`;
         return leaderboard;
     }
     async stop() {

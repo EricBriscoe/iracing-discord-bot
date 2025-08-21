@@ -44,6 +44,9 @@ class iRacingBot {
                         case 'track':
                             await this.handleTrackCommand(interaction);
                             break;
+                        case 'untrack':
+                            await this.handleUntrackCommand(interaction);
+                            break;
                     }
                 } catch (error) {
                     console.error('Error handling interaction:', error);
@@ -90,7 +93,11 @@ class iRacingBot {
                     option.setName('series')
                         .setDescription('Select an official iRacing series')
                         .setRequired(true)
-                        .setAutocomplete(true))
+                        .setAutocomplete(true)),
+
+            new SlashCommandBuilder()
+                .setName('untrack')
+                .setDescription('Remove series tracking from this channel')
         ];
 
         try {
@@ -176,6 +183,55 @@ class iRacingBot {
         } catch (error) {
             console.error('Error unlinking account:', error);
             await interaction.reply({ content: '❌ An error occurred while unlinking the account.', flags: [MessageFlags.Ephemeral] });
+        }
+    }
+
+    private async handleUntrackCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+        try {
+            await interaction.deferReply();
+            
+            if (!interaction.channel) {
+                await interaction.editReply({ content: '❌ This command must be used in a channel.' });
+                return;
+            }
+            
+            // Check if channel is currently being tracked
+            const channelTrack = await this.db.getChannelTrack(interaction.channel.id);
+            
+            if (!channelTrack) {
+                await interaction.editReply({ content: '❌ This channel is not currently tracking any series.' });
+                return;
+            }
+            
+            // Remove the channel tracking
+            const wasRemoved = await this.db.removeChannelTrack(interaction.channel.id);
+            
+            if (wasRemoved) {
+                // Clear all existing messages in the channel
+                if (interaction.channel instanceof TextChannel) {
+                    try {
+                        console.log(`Clearing messages in channel ${interaction.channel.name} after untracking`);
+                        const messages = await interaction.channel.messages.fetch({ limit: 100 });
+                        const messagesToDelete = messages.filter(msg => !msg.pinned && msg.id !== interaction.id);
+                        
+                        if (messagesToDelete.size > 0) {
+                            await interaction.channel.bulkDelete(messagesToDelete, true);
+                            console.log(`Deleted ${messagesToDelete.size} messages from untracked channel`);
+                        }
+                    } catch (error) {
+                        console.error('Error clearing channel messages:', error);
+                    }
+                }
+                
+                await interaction.editReply({ 
+                    content: `✅ Removed series tracking from this channel.\n\n**${channelTrack.series_name}** is no longer being tracked here. All leaderboard messages have been cleared.` 
+                });
+            } else {
+                await interaction.editReply({ content: '❌ Failed to remove channel tracking.' });
+            }
+        } catch (error) {
+            console.error('Error removing channel track:', error);
+            await interaction.editReply({ content: '❌ An error occurred while removing channel tracking.' });
         }
     }
 
@@ -274,12 +330,19 @@ class iRacingBot {
                 selectedSeries.series_name
             );
             
-            // Clear all existing messages in the channel
+            const response = `✅ This channel is now tracking **${selectedSeries.series_name}** lap times.\n\nChannel messages will be cleared and lap time leaderboards will appear here for tracked events.`;
+            
+            await interaction.editReply({ content: response });
+            
+            // Clear all existing messages in the channel after replying
             if (interaction.channel instanceof TextChannel) {
                 try {
                     console.log(`Clearing messages in channel ${interaction.channel.name} for series tracking`);
+                    // Wait a moment to ensure the reply is sent
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    
                     const messages = await interaction.channel.messages.fetch({ limit: 100 });
-                    const messagesToDelete = messages.filter(msg => !msg.pinned && msg.id !== interaction.id);
+                    const messagesToDelete = messages.filter(msg => !msg.pinned);
                     
                     if (messagesToDelete.size > 0) {
                         await interaction.channel.bulkDelete(messagesToDelete, true);
@@ -289,10 +352,6 @@ class iRacingBot {
                     console.error('Error clearing channel messages:', error);
                 }
             }
-            
-            const response = `✅ This channel is now tracking **${selectedSeries.series_name}** lap times.\n\nChannel messages have been cleared. Lap time leaderboards will appear here for tracked events.`;
-            
-            await interaction.editReply({ content: response });
         } catch (error) {
             console.error('Error setting channel track:', error);
             await interaction.editReply({ content: '❌ An error occurred while setting up channel tracking.' });
@@ -319,60 +378,49 @@ class iRacingBot {
     }
     
     private async updateChannelWithCommonCombos(channelTrack: any): Promise<void> {
-        // Define track/car combinations prioritizing current BMW M2 series at Virginia
-        const commonCombos = [
-            {
-                track_id: 467, // Virginia International Raceway (correct ID)
-                track_name: 'Virginia International Raceway',
-                config_name: 'North Course',
-                car_id: 195, // BMW M2 CS Racing
-                car_name: 'BMW M2 CS Racing'
-            },
-            {
-                track_id: 324, // Tsukuba Circuit
-                track_name: 'Tsukuba Circuit',
-                config_name: '2000 Full',
-                car_id: 195, // BMW M2 CS Racing
-                car_name: 'BMW M2 CS Racing'
-            },
-            {
-                track_id: 324, // Tsukuba Circuit
-                track_name: 'Tsukuba Circuit', 
-                config_name: '2000 Full',
-                car_id: 67, // Global Mazda MX-5 Cup
-                car_name: 'Global Mazda MX-5 Cup'
-            }
-        ];
-        
-        const leaderboards = [];
-        
-        for (const combo of commonCombos) {
-            const comboData: TrackCarCombo = {
-                series_id: channelTrack.series_id,
-                track_id: combo.track_id,
-                car_id: combo.car_id,
-                track_name: combo.track_name,
-                config_name: combo.config_name,
-                car_name: combo.car_name,
-                last_updated: new Date().toISOString()
-            };
+        try {
+            console.log(`Processing series ${channelTrack.series_id} (${channelTrack.series_name})`);
             
-            const comboId = await this.db.upsertTrackCarCombo(comboData);
-            await this.updateLapTimesForCombo(comboId, comboData);
+            // First, try to get existing track/car combinations from the database for this series
+            const existingCombos = await this.db.getTrackCarCombosBySeriesId(channelTrack.series_id);
             
-            // Get leaderboard for this combo
-            const topTimes = await this.db.getTopLapTimesForCombo(comboId, 10);
-            if (topTimes.length > 0) {
-                leaderboards.push({
-                    combo: comboData,
-                    times: topTimes
-                });
+            if (existingCombos && existingCombos.length > 0) {
+                console.log(`Found ${existingCombos.length} existing track/car combinations for series ${channelTrack.series_id}`);
+                
+                const leaderboards = [];
+                
+                // Process existing combinations
+                for (const combo of existingCombos) {
+                    await this.updateLapTimesForCombo(combo.id!, combo);
+                    
+                    // Get leaderboard for this combo
+                    const topTimes = await this.db.getTopLapTimesForCombo(combo.id!, 10);
+                    if (topTimes.length > 0) {
+                        leaderboards.push({
+                            combo: combo,
+                            times: topTimes
+                        });
+                    }
+                }
+                
+                // Update Discord channel with leaderboards
+                if (leaderboards.length > 0) {
+                    await this.updateChannelMessages(channelTrack.channel_id, leaderboards);
+                    console.log(`Posted ${leaderboards.length} leaderboards for series ${channelTrack.series_name}`);
+                } else {
+                    console.log(`No lap time data available for existing combinations in series ${channelTrack.series_name}`);
+                }
+                
+                return;
             }
-        }
-        
-        // Update Discord channel with leaderboards
-        if (leaderboards.length > 0) {
-            await this.updateChannelMessages(channelTrack.channel_id, leaderboards);
+            
+            // If no existing combinations, post a message indicating the series is being tracked
+            console.log(`No existing combinations found for series ${channelTrack.series_id}, posting tracking message`);
+            
+            await this.postTrackingMessage(channelTrack.channel_id, channelTrack.series_name);
+            
+        } catch (error) {
+            console.error(`Error updating channel with combos for ${channelTrack.series_name}:`, error);
         }
     }
     
@@ -442,6 +490,33 @@ class iRacingBot {
     }
     
     
+    private async postTrackingMessage(channelId: string, seriesName: string): Promise<void> {
+        try {
+            const channel = await this.client.channels.fetch(channelId);
+            if (!channel || !(channel instanceof TextChannel)) return;
+            
+            console.log(`Posting tracking message in channel ${channel.name}`);
+            
+            // Clear all existing messages (except pinned)
+            const messages = await channel.messages.fetch({ limit: 100 });
+            const messagesToDelete = messages.filter(msg => !msg.pinned);
+            if (messagesToDelete.size > 0) {
+                await channel.bulkDelete(messagesToDelete, true);
+                console.log(`Deleted ${messagesToDelete.size} old messages`);
+            }
+            
+            // Use Discord timestamp formatting for relative time display
+            const timestamp = Math.floor(Date.now() / 1000);
+            const trackingMessage = `**🏁 ${seriesName}**\n\n📊 This channel is now tracking lap times for this series.\n\nLeaderboards will appear here once lap time data becomes available.\n\n*Last updated: <t:${timestamp}:R>*`;
+            
+            await channel.send(trackingMessage);
+            console.log(`Posted tracking message for series ${seriesName}`);
+            
+        } catch (error) {
+            console.error(`Error posting tracking message in channel ${channelId}:`, error);
+        }
+    }
+    
     private formatLeaderboard(combo: TrackCarCombo, lapTimes: LapTimeRecord[]): string {
         let leaderboard = `**🏁 ${combo.track_name}** (${combo.config_name})\n`;
         leaderboard += `**🏎️ ${combo.car_name}**\n\n`;
@@ -451,10 +526,12 @@ class iRacingBot {
             const emoji = position === 1 ? '🥇' : position === 2 ? '🥈' : position === 3 ? '🥉' : '🏁';
             const lapTime = this.iracing.formatLapTime(record.lap_time_microseconds);
             
-            leaderboard += `${emoji} **${position}.** ${record.iracing_username} - \`${lapTime}\`\n`;
+            leaderboard += `${emoji} **${position}.** <@${record.discord_id}> - \`${lapTime}\`\n`;
         });
         
-        leaderboard += `\n*Last updated: ${new Date().toLocaleString()}*`;
+        // Use Discord timestamp formatting for relative time display
+        const timestamp = Math.floor(Date.now() / 1000);
+        leaderboard += `\n*Last updated: <t:${timestamp}:R>*`;
         
         return leaderboard;
     }

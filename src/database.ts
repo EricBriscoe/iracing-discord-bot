@@ -293,7 +293,7 @@ export class Database {
     async getTrackCarCombosBySeriesId(seriesId: number): Promise<TrackCarCombo[]> {
         return new Promise((resolve, reject) => {
             this.db.all(
-                'SELECT id, series_id, track_id, car_id, track_name, config_name, car_name, last_updated FROM track_car_combos WHERE series_id = ?',
+                'SELECT id, series_id, track_id, car_id, track_name, config_name, car_name, last_updated FROM track_car_combos WHERE series_id = ? ORDER BY track_name ASC, car_name ASC',
                 [seriesId],
                 (err, rows: TrackCarCombo[]) => {
                     if (err) reject(err);
@@ -330,6 +330,13 @@ export class Database {
     }
 
     close(): void {
-        this.db.close();
+        if (this.db) {
+            try {
+                this.db.close();
+            } catch (error) {
+                // Ignore errors when closing database (it may already be closed)
+                console.log('Database close error (likely already closed):', error);
+            }
+        }
     }
 }
