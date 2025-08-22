@@ -8,7 +8,7 @@ export interface LeaderboardEmbedOptions {
 }
 
 export class LeaderboardEmbedBuilder {
-    build(seriesName: string, leaderboards: { combo: TrackCarCombo; times: LapTimeRecord[] }[], options?: LeaderboardEmbedOptions): EmbedBuilder[] {
+    build(seriesName: string, leaderboards: { combo: TrackCarCombo; times: LapTimeRecord[]; benchmarkTime?: number }[], options?: LeaderboardEmbedOptions): EmbedBuilder[] {
         const title = `🏁 ${seriesName} — Lap Time Leaderboards`;
         const embeds: EmbedBuilder[] = [];
 
@@ -31,7 +31,7 @@ export class LeaderboardEmbedBuilder {
         // Build fields (max 25 per embed)
         const fields = leaderboards.map(lb => {
             const name = this.truncate(`${lb.combo.track_name} (${lb.combo.config_name}) — ${lb.combo.car_name}`, 256);
-            const value = this.buildFieldValue(lb.times);
+            const value = this.buildFieldValue(lb.times, lb.benchmarkTime);
             return { name, value, inline: false } as const;
         });
 
@@ -56,16 +56,32 @@ export class LeaderboardEmbedBuilder {
         return embeds;
     }
 
-    private buildFieldValue(times: LapTimeRecord[]): string {
-        if (!times || times.length === 0) {
-            return 'No lap times recorded yet.';
+    private buildFieldValue(times: LapTimeRecord[], benchmarkTime?: number): string {
+        const lines: string[] = [];
+        if (benchmarkTime && benchmarkTime > 0) {
+            const benchStr = this.formatLapTime(benchmarkTime);
+            let delta = '';
+            if (times && times.length > 0) {
+                const leader = times[0]!.lap_time_microseconds;
+                const d = (benchmarkTime - leader) / 10000; // seconds
+                const sign = d >= 0 ? '+' : '-';
+                const abs = Math.abs(d);
+                delta = ` (Δ to P1: ${sign}${abs.toFixed(3)})`;
+            }
+            lines.push(`🎯 Benchmark: \`${benchStr}\`${delta}`);
+            lines.push('');
         }
-        const lines = times.map((record, index) => {
+        if (!times || times.length === 0) {
+            lines.push('No lap times recorded yet.');
+            return lines.join('\n');
+        }
+        const rankLines = times.map((record, index) => {
             const position = index + 1;
             const emoji = position === 1 ? '🥇' : position === 2 ? '🥈' : position === 3 ? '🥉' : '🏁';
             const lapTime = this.formatLapTime(record.lap_time_microseconds);
             return `${emoji} **${position}.** <@${record.discord_id}> — \`${lapTime}\``;
         });
+        lines.push(...rankLines);
         // Ensure value <= 1024 characters
         let value = lines.join('\n');
         if (value.length > 1024) {

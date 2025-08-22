@@ -466,7 +466,7 @@ class iRacingBot {
                     combosToProcess = [];
                 }
 
-                const leaderboards: { combo: TrackCarCombo; times: LapTimeRecord[] }[] = [];
+                const leaderboards: { combo: TrackCarCombo; times: LapTimeRecord[]; benchmarkTime?: number }[] = [];
                 
                 // Process filtered combinations
                 for (const combo of combosToProcess) {
@@ -474,11 +474,24 @@ class iRacingBot {
                     
                     // Get leaderboard for this combo
                     const topTimes = await this.db.getTopLapTimesForCombo(combo.id!, 10);
+                    // Compute benchmark time for this combo (aspirational target)
+                    let benchmark: number | undefined;
+                    try {
+                        benchmark = await this.getBenchmarkForCombo(combo);
+                    } catch (e) {
+                        console.warn('Benchmark resolution failed:', e);
+                    }
                     if (topTimes.length > 0) {
                         leaderboards.push({
                             combo: combo,
-                            times: topTimes
+                            times: topTimes,
+                            benchmarkTime: benchmark
                         });
+                    } else {
+                        // Still include an empty block if we have a benchmark to display
+                        if (benchmark) {
+                            leaderboards.push({ combo, times: [], benchmarkTime: benchmark });
+                        }
                     }
                 }
                 
@@ -660,8 +673,30 @@ class iRacingBot {
         this.memoryImageCache.set(key, png);
         return png;
     }
-    
+
     // Plain text builders removed in favor of rich embeds
+
+    // Resolve an aspirational benchmark time for the given combo.
+    // Strategy: query a curated list of pro cust_ids (env PRO_CUST_IDS) and take the minimum best lap for the track+car.
+    private async getBenchmarkForCombo(combo: TrackCarCombo): Promise<number | undefined> {
+        const proListEnv = process.env.PRO_CUST_IDS || '168966'; // Max Verstappen by default
+        const ids = proListEnv.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+        if (ids.length === 0) return undefined;
+        let best: number | undefined;
+        for (const custId of ids) {
+            try {
+                const bests = await this.iracing.getMemberBestForTrack(custId, combo.track_id, combo.car_id);
+                for (const b of bests) {
+                    if (typeof b.best_lap_time === 'number') {
+                        if (best === undefined || b.best_lap_time < best) best = b.best_lap_time;
+                    }
+                }
+            } catch (e) {
+                // ignore errors per cust
+            }
+        }
+        return best;
+    }
 
     async stop(): Promise<void> {
         if (this.seriesUpdateInterval) {

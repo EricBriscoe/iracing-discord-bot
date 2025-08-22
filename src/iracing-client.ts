@@ -204,8 +204,10 @@ export class iRacingClient {
         }
     }
 
-    private async ensureAuthenticated(): Promise<void> {
-        if (!this.authCookie) {
+    private async ensureAuthenticated(forceReauth: boolean = false): Promise<void> {
+        if (!this.authCookie || forceReauth) {
+            this.authCookie = null;
+            this.loginPromise = null;
             await this.login();
         }
     }
@@ -240,7 +242,31 @@ export class iRacingClient {
             }
             
             return null;
-        } catch (error) {
+        } catch (error: any) {
+            if (error.response?.status === 401) {
+                console.log('Authentication expired, retrying with fresh login...');
+                try {
+                    await this.ensureAuthenticated(true);
+                    const response = await this.client.get('/data/lookup/drivers', {
+                        params: {
+                            search_term: username
+                        }
+                    });
+                    const results = response.data as DriverSearchResult[];
+                    if (results && results.length > 0) {
+                        for (const member of results) {
+                            if (member.display_name.toLowerCase() === username.toLowerCase()) {
+                                return member.cust_id;
+                            }
+                        }
+                        return results[0]?.cust_id || null;
+                    }
+                    return null;
+                } catch (retryError) {
+                    console.error(`Error searching for member ${username} after retry:`, retryError);
+                    return null;
+                }
+            }
             console.error(`Error searching for member ${username}:`, error);
             return null;
         }
@@ -350,7 +376,25 @@ export class iRacingClient {
                 // Direct response format
                 return response.data as MemberBests;
             }
-        } catch (error) {
+        } catch (error: any) {
+            if (error.response?.status === 401) {
+                console.log('Authentication expired for lap times, retrying with fresh login...');
+                try {
+                    await this.ensureAuthenticated(true);
+                    const params: any = { cust_id: customerId };
+                    if (carId) params.car_id = carId;
+                    const response = await this.client.get('/data/stats/member_bests', { params });
+                    if (response.data.link) {
+                        const s3Response = await this.client.get(response.data.link);
+                        return s3Response.data as MemberBests;
+                    } else {
+                        return response.data as MemberBests;
+                    }
+                } catch (retryError) {
+                    console.error(`Error fetching member best lap times for ${customerId} after retry:`, retryError);
+                    return null;
+                }
+            }
             console.error(`Error fetching member best lap times for ${customerId}:`, error);
             return null;
         }

@@ -417,11 +417,24 @@ class iRacingBot {
                 for (const combo of combosToProcess) {
                     await this.updateLapTimesForCombo(combo.id, combo);
                     const topTimes = await this.db.getTopLapTimesForCombo(combo.id, 10);
+                    let benchmark;
+                    try {
+                        benchmark = await this.getBenchmarkForCombo(combo);
+                    }
+                    catch (e) {
+                        console.warn('Benchmark resolution failed:', e);
+                    }
                     if (topTimes.length > 0) {
                         leaderboards.push({
                             combo: combo,
-                            times: topTimes
+                            times: topTimes,
+                            benchmarkTime: benchmark
                         });
+                    }
+                    else {
+                        if (benchmark) {
+                            leaderboards.push({ combo, times: [], benchmarkTime: benchmark });
+                        }
                     }
                 }
                 let embedOptions = await this.resolveEmbedImagesForCurrent(combosToProcess);
@@ -583,6 +596,27 @@ class iRacingBot {
         catch { }
         this.memoryImageCache.set(key, png);
         return png;
+    }
+    async getBenchmarkForCombo(combo) {
+        const proListEnv = process.env.PRO_CUST_IDS || '168966';
+        const ids = proListEnv.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+        if (ids.length === 0)
+            return undefined;
+        let best;
+        for (const custId of ids) {
+            try {
+                const bests = await this.iracing.getMemberBestForTrack(custId, combo.track_id, combo.car_id);
+                for (const b of bests) {
+                    if (typeof b.best_lap_time === 'number') {
+                        if (best === undefined || b.best_lap_time < best)
+                            best = b.best_lap_time;
+                    }
+                }
+            }
+            catch (e) {
+            }
+        }
+        return best;
     }
     async stop() {
         if (this.seriesUpdateInterval) {
