@@ -10,6 +10,7 @@ class iRacingClient {
     constructor() {
         this.authCookie = null;
         this.loginPromise = null;
+        this.staticImagesBase = 'https://images-static.iracing.com/';
         this.username = process.env.IRACING_USERNAME || '';
         if (process.env.IRACING_HASHWORD) {
             this.password = process.env.IRACING_HASHWORD;
@@ -79,6 +80,10 @@ class iRacingClient {
         if (!this.authCookie) {
             await this.login();
         }
+    }
+    async getHttpClient() {
+        await this.ensureAuthenticated();
+        return this.client;
     }
     async searchMember(username) {
         try {
@@ -231,28 +236,217 @@ class iRacingClient {
             return null;
         }
     }
+    async getSeriesSeasonsFor(year, quarter) {
+        try {
+            await this.ensureAuthenticated();
+            const response = await this.client.get('/data/series/seasons', {
+                params: {
+                    include_series: true,
+                    season_year: year,
+                    season_quarter: quarter
+                }
+            });
+            if (response.data.link) {
+                const s3Response = await this.client.get(response.data.link);
+                return s3Response.data;
+            }
+            return response.data;
+        }
+        catch (error) {
+            console.error(`Error fetching series seasons for ${year} Q${quarter}:`, error);
+            return null;
+        }
+    }
+    async getSeriesSeasonSchedule(seasonId) {
+        try {
+            await this.ensureAuthenticated();
+            const response = await this.client.get('/data/series/season_schedule', {
+                params: { season_id: seasonId }
+            });
+            if (response.data.link) {
+                console.log('Fetching series season schedule from S3 link');
+                const s3Response = await this.client.get(response.data.link);
+                return s3Response.data;
+            }
+            return response.data;
+        }
+        catch (error) {
+            console.error(`Error fetching season schedule for season ${seasonId}:`, error);
+            return null;
+        }
+    }
     async getCurrentSeriesSchedule(seriesId) {
         try {
             await this.ensureAuthenticated();
             const response = await this.client.get('/data/season/race_guide', {
-                params: {
-                    series_id: seriesId,
-                    include_end_after_time: true
-                }
+                params: { include_end_after_from: true }
             });
             if (response.data.link) {
                 console.log('Fetching series schedule from S3 link');
                 const s3Response = await this.client.get(response.data.link);
                 return s3Response.data;
             }
-            else {
-                return response.data;
-            }
+            return response.data;
         }
         catch (error) {
-            console.error(`Error fetching series schedule for ${seriesId}:`, error);
+            console.error(`Error fetching race guide:`, error);
             return null;
         }
+    }
+    async fetchMaybeS3(path, params) {
+        await this.ensureAuthenticated();
+        const response = await this.client.get(path, { params });
+        if (response.data && response.data.link) {
+            const s3 = await this.client.get(response.data.link);
+            return s3.data;
+        }
+        return response.data;
+    }
+    async getCarAssets() {
+        return this.fetchMaybeS3('/data/car/assets');
+    }
+    async getTrackAssets() {
+        return this.fetchMaybeS3('/data/track/assets');
+    }
+    async getCarImageUrl(carId) {
+        try {
+            const assets = await this.getCarAssets();
+            let entry = null;
+            if (Array.isArray(assets)) {
+                entry = assets.find((a) => a && (a.car_id === carId || a.id === carId));
+            }
+            else if (assets && typeof assets === 'object') {
+                entry = assets[carId] || Object.values(assets).find((a) => a && (a.car_id === carId || a.id === carId));
+            }
+            if (!entry)
+                return null;
+            const folder = entry.folder;
+            const file = (entry.small_image || entry.large_image);
+            if (folder && file) {
+                const path = `${folder.replace(/\/$/, '')}/${file.replace(/^\//, '')}`;
+                return this.staticImagesBase + path.replace(/^\//, '');
+            }
+            const logo = entry.logo;
+            if (logo) {
+                return logo.startsWith('http') ? logo : this.staticImagesBase + logo.replace(/^\//, '');
+            }
+            return null;
+        }
+        catch {
+            return null;
+        }
+    }
+    async getTrackImageUrl(trackId) {
+        try {
+            const assets = await this.getTrackAssets();
+            let entry = null;
+            if (Array.isArray(assets)) {
+                entry = assets.find((a) => a && (a.track_id === trackId || a.id === trackId));
+            }
+            else if (assets && typeof assets === 'object') {
+                entry = assets[trackId] || Object.values(assets).find((a) => a && (a.track_id === trackId || a.id === trackId));
+            }
+            if (!entry)
+                return null;
+            const folder = entry.folder;
+            const file = (entry.large_image || entry.small_image);
+            if (folder && file) {
+                const path = `${folder.replace(/\/$/, '')}/${file.replace(/^\//, '')}`;
+                return this.staticImagesBase + path.replace(/^\//, '');
+            }
+            const logo = entry.logo;
+            if (logo) {
+                return logo.startsWith('http') ? logo : this.staticImagesBase + logo.replace(/^\//, '');
+            }
+            return null;
+        }
+        catch {
+            return null;
+        }
+    }
+    async getTrackMapActiveUrl(trackId) {
+        try {
+            const assets = await this.getTrackAssets();
+            let entry = null;
+            if (Array.isArray(assets)) {
+                entry = assets.find((a) => a && (a.track_id === trackId || a.id === trackId));
+            }
+            else if (assets && typeof assets === 'object') {
+                entry = assets[trackId] || Object.values(assets).find((a) => a && (a.track_id === trackId || a.id === trackId));
+            }
+            if (!entry)
+                return null;
+            const trackMap = entry.track_map;
+            const layers = entry.track_map_layers;
+            const activeName = layers?.active || 'active.svg';
+            if (!trackMap)
+                return null;
+            const base = trackMap.replace(/\/$/, '');
+            const file = activeName.endsWith('.svg') ? activeName : `${activeName}.svg`;
+            return `${base}/${file}`;
+        }
+        catch {
+            return null;
+        }
+    }
+    async getCurrentOrNextEventForSeries(seriesId) {
+        let seasons = await this.getSeriesSeasons(seriesId);
+        const seasonRowsFrom = (data) => Array.isArray(data) ? data : (data?.seasons || data?.data || []);
+        const seasonsList = seasonRowsFrom(seasons) || [];
+        const bySeries = seasonsList.filter((s) => s && (s.series_id === seriesId || (s.series && s.series.series_id === seriesId)));
+        if (bySeries.length > 0) {
+            const active = bySeries.find((s) => !!s.active) || bySeries[0];
+            const raceWeek = (active.race_week ?? active.race_week_num ?? null);
+            const schedules = active.schedules || [];
+            if (schedules.length > 0) {
+                let pick = schedules.find((it) => it.race_week_num === raceWeek);
+                if (!pick) {
+                    const sorted = schedules.slice().sort((a, b) => (a.race_week_num ?? 0) - (b.race_week_num ?? 0));
+                    pick = sorted[0];
+                }
+                if (pick && pick.track && pick.track.track_id) {
+                    return { track_id: pick.track.track_id, track_name: pick.track.track_name, config_name: pick.track.config_name };
+                }
+            }
+        }
+        return await (async () => {
+            const now = new Date();
+            const parseTime = (x) => (x ? new Date(x) : null);
+            let fallbackSeasons = seasonsList;
+            if (fallbackSeasons.length === 0) {
+                const currentMonth = now.getUTCMonth();
+                const currentQuarter = Math.floor(currentMonth / 3) + 1;
+                let y = now.getUTCFullYear();
+                let q = currentQuarter;
+                for (let i = 0; i < 8 && fallbackSeasons.length === 0; i++) {
+                    const data = await this.getSeriesSeasonsFor(y, q);
+                    const rows = seasonRowsFrom(data);
+                    const bs = rows.filter((s) => s && (s.series_id === seriesId || (s.series && s.series.series_id === seriesId)));
+                    if (bs.length > 0)
+                        fallbackSeasons = bs;
+                    q -= 1;
+                    if (q < 1) {
+                        q = 4;
+                        y -= 1;
+                    }
+                }
+            }
+            if (fallbackSeasons.length === 0)
+                return null;
+            const seasonId = fallbackSeasons[0].season_id || (fallbackSeasons[0].season && fallbackSeasons[0].season.season_id);
+            if (!seasonId)
+                return null;
+            const schedule = await this.getSeriesSeasonSchedule(seasonId);
+            const items = Array.isArray(schedule) ? schedule : (schedule.schedule || schedule.data || []);
+            if (!items || items.length === 0)
+                return null;
+            const startOfItem = (it) => parseTime(it.start_time || it.start || it.race_week_start);
+            const dated = items.map(it => ({ it, t: startOfItem(it) })).filter(x => x.t);
+            const upcoming = dated.filter(x => x.t.getTime() > now.getTime()).sort((a, b) => a.t.getTime() - b.t.getTime());
+            const pick = upcoming[0]?.it || dated.sort((a, b) => b.t.getTime() - a.t.getTime())[0]?.it || items[0];
+            const tr = pick.track || pick;
+            return tr && tr.track_id ? { track_id: tr.track_id, track_name: tr.track_name, config_name: tr.config_name } : null;
+        })();
     }
 }
 exports.iRacingClient = iRacingClient;

@@ -1,7 +1,13 @@
-import { Client, GatewayIntentBits, SlashCommandBuilder, ChatInputCommandInteraction, MessageFlags, AutocompleteInteraction, PermissionFlagsBits, TextChannel } from 'discord.js';
+import { Client, GatewayIntentBits, SlashCommandBuilder, ChatInputCommandInteraction, MessageFlags, AutocompleteInteraction, PermissionFlagsBits, TextChannel, AttachmentBuilder } from 'discord.js';
 import { config } from 'dotenv';
 import { Database, OfficialSeries, TrackCarCombo, LapTimeRecord } from './database';
 import { iRacingClient, Series, BestLapTime } from './iracing-client';
+import { LeaderboardEmbedBuilder, LeaderboardEmbedOptions } from './leaderboard-embed-builder';
+import axios from 'axios';
+import sharp from 'sharp';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import { createHash } from 'crypto';
 
 config();
 
@@ -10,6 +16,10 @@ class iRacingBot {
     private db: Database;
     private iracing: iRacingClient;
     private seriesUpdateInterval: NodeJS.Timeout | null = null;
+    private channelMessageMap: Map<string, string> = new Map();
+    private embedBuilder: LeaderboardEmbedBuilder;
+    private imageCacheDir: string;
+    private memoryImageCache: Map<string, Buffer> = new Map();
 
     constructor() {
         this.client = new Client({
@@ -18,6 +28,8 @@ class iRacingBot {
 
         this.db = new Database();
         this.iracing = new iRacingClient();
+        this.embedBuilder = new LeaderboardEmbedBuilder();
+        this.imageCacheDir = path.resolve('data/cache/images');
         this.setupEventHandlers();
     }
 
@@ -25,8 +37,11 @@ class iRacingBot {
         this.client.once('ready', async () => {
             console.log(`${this.client.user?.tag} has connected to Discord!`);
             await this.db.initDb();
+            await this.ensureImageCacheDir();
             await this.registerSlashCommands();
             await this.updateOfficialSeries();
+            // Prepare tracked channels: clear messages and post base message
+            await this.prepareTrackedChannelsOnStartup();
             this.startSeriesUpdateTimer();
             this.startLapTimeUpdateTimer();
         });
@@ -84,7 +99,12 @@ class iRacingBot {
 
             new SlashCommandBuilder()
                 .setName('unlink')
-                .setDescription('Unlink your iRacing account from Discord'),
+                .setDescription('Unlink your iRacing account from Discord')
+                .addUserOption(option =>
+                    option.setName('user')
+                        .setDescription('User to unlink (admin only - leave blank to unlink yourself)')
+                        .setRequired(false)
+                ),
                 
             new SlashCommandBuilder()
                 .setName('track')
@@ -173,12 +193,30 @@ class iRacingBot {
 
     private async handleUnlinkCommand(interaction: ChatInputCommandInteraction): Promise<void> {
         try {
-            const wasLinked = await this.db.unlinkUser(interaction.user.id);
-            
+            const targetUser = interaction.options.getUser('user');
+
+            // If unlinking someone else, require admin
+            if (targetUser && targetUser.id !== interaction.user.id) {
+                if (!this.isServerAdmin(interaction)) {
+                    await interaction.reply({ content: '❌ Only server administrators can unlink other users.', flags: [MessageFlags.Ephemeral] });
+                    return;
+                }
+            }
+
+            const userToUnlink = targetUser || interaction.user;
+
+            const wasLinked = await this.db.unlinkUser(userToUnlink.id);
+
             if (wasLinked) {
-                await interaction.reply({ content: '✅ Successfully unlinked your account.', flags: [MessageFlags.Ephemeral] });
+                const response = (targetUser && targetUser.id !== interaction.user.id)
+                    ? `✅ Successfully unlinked <@${userToUnlink.id}>.`
+                    : '✅ Successfully unlinked your account.';
+                await interaction.reply({ content: response, flags: [MessageFlags.Ephemeral] });
             } else {
-                await interaction.reply({ content: '❌ No linked account found.', flags: [MessageFlags.Ephemeral] });
+                const response = (targetUser && targetUser.id !== interaction.user.id)
+                    ? `❌ No linked account found for <@${userToUnlink.id}>.`
+                    : '❌ No linked account found.';
+                await interaction.reply({ content: response, flags: [MessageFlags.Ephemeral] });
             }
         } catch (error) {
             console.error('Error unlinking account:', error);
@@ -284,6 +322,34 @@ class iRacingBot {
             await this.updateChannelLapTimes();
         }, 30000);
     }
+
+    private async prepareTrackedChannelsOnStartup(): Promise<void> {
+        try {
+            const trackedChannels = await this.db.getAllChannelTracks();
+            for (const channelTrack of trackedChannels) {
+                const channel = await this.client.channels.fetch(channelTrack.channel_id);
+                if (!channel || !(channel instanceof TextChannel)) continue;
+
+                try {
+                    const messages = await channel.messages.fetch({ limit: 100 });
+                    const messagesToDelete = messages.filter(m => !m.pinned);
+                    if (messagesToDelete.size > 0) {
+                        await channel.bulkDelete(messagesToDelete, true);
+                        console.log(`Startup: deleted ${messagesToDelete.size} messages in #${channel.name}`);
+                    }
+                } catch (err) {
+                    console.error('Error clearing channel on startup:', err);
+                }
+
+                // Post base tracking message and store its ID (embed)
+                const baseEmbeds = this.embedBuilder.build(channelTrack.series_name, []);
+                const msg = await channel.send({ embeds: baseEmbeds.slice(0, 10) });
+                this.channelMessageMap.set(channel.id, msg.id);
+            }
+        } catch (error) {
+            console.error('Error preparing tracked channels on startup:', error);
+        }
+    }
     
     private async handleTrackAutocomplete(interaction: AutocompleteInteraction): Promise<void> {
         const focusedValue = interaction.options.getFocused().toLowerCase();
@@ -348,6 +414,8 @@ class iRacingBot {
                         await interaction.channel.bulkDelete(messagesToDelete, true);
                         console.log(`Deleted ${messagesToDelete.size} messages from tracked channel`);
                     }
+                    // Post the base tracking message and store it
+                    await this.postTrackingMessage(interaction.channel.id, selectedSeries.series_name);
                 } catch (error) {
                     console.error('Error clearing channel messages:', error);
                 }
@@ -387,10 +455,21 @@ class iRacingBot {
             if (existingCombos && existingCombos.length > 0) {
                 console.log(`Found ${existingCombos.length} existing track/car combinations for series ${channelTrack.series_id}`);
                 
-                const leaderboards = [];
+                // Determine current/next active track for this series, and filter combos to that track only
+                const currentTrack = await this.iracing.getCurrentOrNextEventForSeries(channelTrack.series_id);
+                let combosToProcess = existingCombos;
+                if (currentTrack?.track_id) {
+                    combosToProcess = existingCombos.filter(c => c.track_id === currentTrack.track_id && (!currentTrack.config_name || c.config_name === currentTrack.config_name));
+                    console.log(`Filtered to ${combosToProcess.length} combos for current track_id=${currentTrack.track_id}`);
+                } else {
+                    console.log('No current track found for series; ignoring old combos');
+                    combosToProcess = [];
+                }
+
+                const leaderboards: { combo: TrackCarCombo; times: LapTimeRecord[] }[] = [];
                 
-                // Process existing combinations
-                for (const combo of existingCombos) {
+                // Process filtered combinations
+                for (const combo of combosToProcess) {
                     await this.updateLapTimesForCombo(combo.id!, combo);
                     
                     // Get leaderboard for this combo
@@ -403,13 +482,22 @@ class iRacingBot {
                     }
                 }
                 
-                // Update Discord channel with leaderboards
-                if (leaderboards.length > 0) {
-                    await this.updateChannelMessages(channelTrack.channel_id, leaderboards);
-                    console.log(`Posted ${leaderboards.length} leaderboards for series ${channelTrack.series_name}`);
-                } else {
-                    console.log(`No lap time data available for existing combinations in series ${channelTrack.series_name}`);
+                // Resolve images for current track + first car (if any)
+                let embedOptions: LeaderboardEmbedOptions = await this.resolveEmbedImagesForCurrent(combosToProcess);
+                if (currentTrack?.track_id && combosToProcess.length === 0) {
+                    // If we filtered to none (e.g., no data yet), still try to show track image for current week
+                    try {
+                        const [trackUrl, mapActiveUrl] = await Promise.all([
+                            this.iracing.getTrackImageUrl(currentTrack.track_id),
+                            this.iracing.getTrackMapActiveUrl(currentTrack.track_id)
+                        ]);
+                        if (trackUrl) embedOptions.trackImageUrl = trackUrl;
+                        if (mapActiveUrl) embedOptions.trackMapActiveUrl = mapActiveUrl;
+                    } catch {}
                 }
+                // Update Discord channel with a single consolidated message (edit in place)
+                await this.updateChannelSingleMessage(channelTrack.channel_id, channelTrack.series_name, leaderboards, embedOptions);
+                console.log(`Updated consolidated message for series ${channelTrack.series_name}`);
                 
                 return;
             }
@@ -424,30 +512,42 @@ class iRacingBot {
         }
     }
     
-    private async updateChannelMessages(channelId: string, leaderboards: any[]): Promise<void> {
+    private async updateChannelSingleMessage(channelId: string, seriesName: string, leaderboards: any[], options?: LeaderboardEmbedOptions): Promise<void> {
         try {
             const channel = await this.client.channels.fetch(channelId);
             if (!channel || !(channel instanceof TextChannel)) return;
-            
-            console.log(`Updating messages in channel ${channel.name}`);
-            
-            // Clear all existing messages (except pinned)
-            const messages = await channel.messages.fetch({ limit: 100 });
-            const messagesToDelete = messages.filter(msg => !msg.pinned);
-            if (messagesToDelete.size > 0) {
-                await channel.bulkDelete(messagesToDelete, true);
-                console.log(`Deleted ${messagesToDelete.size} old messages`);
+            let files: AttachmentBuilder[] | undefined;
+            let embedOptions = options;
+            // If we have a trackMapActiveUrl that is a remote URL, rasterize to PNG and attach
+            if (options?.trackMapActiveUrl && !options.trackMapActiveUrl.startsWith('attachment://')) {
+                try {
+                    const png = await this.getRasterizedPng(options.trackMapActiveUrl);
+                    const attachmentName = 'track-map.png';
+                    files = [new AttachmentBuilder(png, { name: attachmentName })];
+                    embedOptions = { ...options, trackMapActiveUrl: `attachment://${attachmentName}` };
+                } catch (e) {
+                    console.warn('Failed to rasterize SVG, falling back to remote URL:', e);
+                }
             }
-            
-            // Send new leaderboard messages
-            for (const leaderboard of leaderboards) {
-                const messageContent = this.formatLeaderboard(leaderboard.combo, leaderboard.times);
-                await channel.send(messageContent);
-                console.log(`Posted leaderboard for ${leaderboard.combo.track_name} - ${leaderboard.combo.car_name}`);
+            const embeds = this.embedBuilder.build(seriesName, leaderboards, embedOptions);
+
+            const messageId = this.channelMessageMap.get(channelId);
+            if (messageId) {
+                try {
+                    const msg = await channel.messages.fetch(messageId);
+                    await msg.edit({ embeds: embeds.slice(0, 10), files });
+                    return;
+                } catch (e) {
+                    console.warn(`Failed to fetch/edit existing message ${messageId} in ${channelId}, sending new one.`, e);
+                    this.channelMessageMap.delete(channelId);
+                }
             }
-            
+
+            // If no message tracked or editing failed, send a new one (no wiping here)
+            const newMsg = await channel.send({ embeds: embeds.slice(0, 10), files });
+            this.channelMessageMap.set(channelId, newMsg.id);
         } catch (error) {
-            console.error(`Error updating messages in channel ${channelId}:`, error);
+            console.error(`Error updating consolidated message in channel ${channelId}:`, error);
         }
     }
     
@@ -491,50 +591,77 @@ class iRacingBot {
     
     
     private async postTrackingMessage(channelId: string, seriesName: string): Promise<void> {
+        // Post or edit the base message without clearing; startup handles wiping
+        // Try to attach current track/car images when possible
+        const embedOptions: LeaderboardEmbedOptions = await this.resolveEmbedImagesForCurrent([]);
+        await this.updateChannelSingleMessage(channelId, seriesName, [], embedOptions);
+        console.log(`Ensured base tracking message for series ${seriesName}`);
+    }
+
+    private async resolveEmbedImagesForCurrent(combos: TrackCarCombo[]): Promise<LeaderboardEmbedOptions> {
+        const opts: LeaderboardEmbedOptions = {};
         try {
-            const channel = await this.client.channels.fetch(channelId);
-            if (!channel || !(channel instanceof TextChannel)) return;
-            
-            console.log(`Posting tracking message in channel ${channel.name}`);
-            
-            // Clear all existing messages (except pinned)
-            const messages = await channel.messages.fetch({ limit: 100 });
-            const messagesToDelete = messages.filter(msg => !msg.pinned);
-            if (messagesToDelete.size > 0) {
-                await channel.bulkDelete(messagesToDelete, true);
-                console.log(`Deleted ${messagesToDelete.size} old messages`);
+            // Track image from the first combo's track if available
+            if (combos.length > 0) {
+                const first = combos[0]!;
+                const tId = first.track_id;
+                const [trackUrl, mapActiveUrl] = await Promise.all([
+                    this.iracing.getTrackImageUrl(tId),
+                    this.iracing.getTrackMapActiveUrl(tId)
+                ]);
+                if (trackUrl) opts.trackImageUrl = trackUrl;
+                if (mapActiveUrl) opts.trackMapActiveUrl = mapActiveUrl;
+                const cId = first.car_id;
+                const carUrl = await this.iracing.getCarImageUrl(cId);
+                if (carUrl) opts.carImageUrl = carUrl;
+            } else {
+                // If no combos provided, try to determine series from a tracked channel and use series schedule
+                // No-op here; we keep opts empty to avoid extra calls without context
             }
-            
-            // Use Discord timestamp formatting for relative time display
-            const timestamp = Math.floor(Date.now() / 1000);
-            const trackingMessage = `**🏁 ${seriesName}**\n\n📊 This channel is now tracking lap times for this series.\n\nLeaderboards will appear here once lap time data becomes available.\n\n*Last updated: <t:${timestamp}:R>*`;
-            
-            await channel.send(trackingMessage);
-            console.log(`Posted tracking message for series ${seriesName}`);
-            
-        } catch (error) {
-            console.error(`Error posting tracking message in channel ${channelId}:`, error);
+        } catch (e) {
+            console.warn('Failed to resolve embed images:', e);
         }
+        return opts;
+    }
+
+    private async ensureImageCacheDir(): Promise<void> {
+        try {
+            await fs.mkdir(this.imageCacheDir, { recursive: true });
+        } catch {}
+    }
+
+    private hashUrl(url: string): string {
+        return createHash('sha256').update(url).digest('hex');
+    }
+
+    private async getRasterizedPng(svgUrl: string): Promise<Buffer> {
+        const key = this.hashUrl(svgUrl);
+        // In-memory cache
+        const inMem = this.memoryImageCache.get(key);
+        if (inMem) return inMem;
+
+        await this.ensureImageCacheDir();
+        const filePath = path.join(this.imageCacheDir, `${key}.png`);
+        try {
+            const onDisk = await fs.readFile(filePath);
+            this.memoryImageCache.set(key, onDisk);
+            return onDisk;
+        } catch {}
+
+        // Fetch and rasterize
+        const res = await axios.get(svgUrl, { responseType: 'arraybuffer' });
+        const input = Buffer.from(res.data);
+        const png = await sharp(input, { density: 300 })
+            .png({ compressionLevel: 9 })
+            .resize({ width: 1280, withoutEnlargement: true })
+            .toBuffer();
+        // Save to disk and memory
+        try { await fs.writeFile(filePath, png); } catch {}
+        this.memoryImageCache.set(key, png);
+        return png;
     }
     
-    private formatLeaderboard(combo: TrackCarCombo, lapTimes: LapTimeRecord[]): string {
-        let leaderboard = `**🏁 ${combo.track_name}** (${combo.config_name})\n`;
-        leaderboard += `**🏎️ ${combo.car_name}**\n\n`;
-        
-        lapTimes.forEach((record, index) => {
-            const position = index + 1;
-            const emoji = position === 1 ? '🥇' : position === 2 ? '🥈' : position === 3 ? '🥉' : '🏁';
-            const lapTime = this.iracing.formatLapTime(record.lap_time_microseconds);
-            
-            leaderboard += `${emoji} **${position}.** <@${record.discord_id}> - \`${lapTime}\`\n`;
-        });
-        
-        // Use Discord timestamp formatting for relative time display
-        const timestamp = Math.floor(Date.now() / 1000);
-        leaderboard += `\n*Last updated: <t:${timestamp}:R>*`;
-        
-        return leaderboard;
-    }
+    // Plain text builders removed in favor of rich embeds
 
     async stop(): Promise<void> {
         if (this.seriesUpdateInterval) {

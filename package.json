@@ -7,6 +7,7 @@
     "build": "tsc",
     "start": "node dist/bot.js",
     "dev": "ts-node src/bot.ts",
+    "scrape-docs": "node dist/scrape-docs.js",
     "clean": "rm -rf dist"
   },
   "keywords": [
@@ -21,6 +22,7 @@
     "axios": "^1.6.2",
     "discord.js": "^14.14.1",
     "dotenv": "^16.3.1",
+    "sharp": "^0.33.3",
     "sqlite3": "^5.1.6"
   },
   "devDependencies": {

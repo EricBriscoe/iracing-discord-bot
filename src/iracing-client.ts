@@ -123,6 +123,7 @@ export class iRacingClient {
     private client: AxiosInstance;
     private authCookie: string | null = null;
     private loginPromise: Promise<void> | null = null;
+    private staticImagesBase = 'https://images-static.iracing.com/';
 
     constructor() {
         this.username = process.env.IRACING_USERNAME || '';
@@ -207,6 +208,12 @@ export class iRacingClient {
         if (!this.authCookie) {
             await this.login();
         }
+    }
+
+    // Expose the authenticated Axios client for callers that need raw access
+    async getHttpClient(): Promise<AxiosInstance> {
+        await this.ensureAuthenticated();
+        return this.client;
     }
 
     async searchMember(username: string): Promise<number | null> {
@@ -388,27 +395,218 @@ export class iRacingClient {
         }
     }
     
-    async getCurrentSeriesSchedule(seriesId: number): Promise<any> {
+    private async getSeriesSeasonsFor(year: number, quarter: number): Promise<any> {
         try {
             await this.ensureAuthenticated();
-            
-            const response = await this.client.get('/data/season/race_guide', {
+            const response = await this.client.get('/data/series/seasons', {
                 params: {
-                    series_id: seriesId,
-                    include_end_after_time: true
+                    include_series: true,
+                    season_year: year,
+                    season_quarter: quarter
                 }
             });
-            
+            if (response.data.link) {
+                const s3Response = await this.client.get(response.data.link);
+                return s3Response.data;
+            }
+            return response.data;
+        } catch (error) {
+            console.error(`Error fetching series seasons for ${year} Q${quarter}:`, error);
+            return null;
+        }
+    }
+    
+    async getSeriesSeasonSchedule(seasonId: number): Promise<any> {
+        try {
+            await this.ensureAuthenticated();
+            const response = await this.client.get('/data/series/season_schedule', {
+                params: { season_id: seasonId }
+            });
+            if (response.data.link) {
+                console.log('Fetching series season schedule from S3 link');
+                const s3Response = await this.client.get(response.data.link);
+                return s3Response.data;
+            }
+            return response.data;
+        } catch (error) {
+            console.error(`Error fetching season schedule for season ${seasonId}:`, error);
+            return null;
+        }
+    }
+    
+    async getCurrentSeriesSchedule(seriesId: number): Promise<any> {
+        // Maintained for backwards compatibility; prefer using getSeriesSeasonSchedule via getCurrentOrNextEventForSeries
+        try {
+            await this.ensureAuthenticated();
+            const response = await this.client.get('/data/season/race_guide', {
+                params: { include_end_after_from: true }
+            });
             if (response.data.link) {
                 console.log('Fetching series schedule from S3 link');
                 const s3Response = await this.client.get(response.data.link);
                 return s3Response.data;
-            } else {
-                return response.data;
             }
+            return response.data;
         } catch (error) {
-            console.error(`Error fetching series schedule for ${seriesId}:`, error);
+            console.error(`Error fetching race guide:`, error);
             return null;
         }
+    }
+
+    // Assets helpers
+    private async fetchMaybeS3<T = any>(path: string, params?: any): Promise<T> {
+        await this.ensureAuthenticated();
+        const response = await this.client.get(path, { params });
+        if (response.data && response.data.link) {
+            const s3 = await this.client.get(response.data.link);
+            return s3.data as T;
+        }
+        return response.data as T;
+    }
+
+    async getCarAssets(): Promise<any> {
+        return this.fetchMaybeS3('/data/car/assets');
+    }
+
+    async getTrackAssets(): Promise<any> {
+        // If /data/track/assets is not available in some environments, callers should handle errors.
+        return this.fetchMaybeS3('/data/track/assets');
+    }
+
+    async getCarImageUrl(carId: number): Promise<string | null> {
+        try {
+            const assets = await this.getCarAssets();
+            // assets might be an array or object keyed by car_id
+            let entry: any = null;
+            if (Array.isArray(assets)) {
+                entry = assets.find((a: any) => a && (a.car_id === carId || a.id === carId));
+            } else if (assets && typeof assets === 'object') {
+                entry = assets[carId] || Object.values(assets).find((a: any) => a && (a.car_id === carId || a.id === carId));
+            }
+            if (!entry) return null;
+            // Prefer small/large image with folder
+            const folder = entry.folder as string | undefined;
+            const file = (entry.small_image || entry.large_image) as string | undefined;
+            if (folder && file) {
+                const path = `${folder.replace(/\/$/, '')}/${file.replace(/^\//, '')}`;
+                return this.staticImagesBase + path.replace(/^\//, '');
+            }
+            // Fallback to logo if absolute/relative
+            const logo = entry.logo as string | undefined;
+            if (logo) {
+                return logo.startsWith('http') ? logo : this.staticImagesBase + logo.replace(/^\//, '');
+            }
+            return null;
+        } catch {
+            return null;
+        }
+    }
+
+    async getTrackImageUrl(trackId: number): Promise<string | null> {
+        try {
+            const assets = await this.getTrackAssets();
+            let entry: any = null;
+            if (Array.isArray(assets)) {
+                entry = assets.find((a: any) => a && (a.track_id === trackId || a.id === trackId));
+            } else if (assets && typeof assets === 'object') {
+                entry = assets[trackId] || Object.values(assets).find((a: any) => a && (a.track_id === trackId || a.id === trackId));
+            }
+            if (!entry) return null;
+            // Prefer large or small image with folder
+            const folder = entry.folder as string | undefined;
+            const file = (entry.large_image || entry.small_image) as string | undefined;
+            if (folder && file) {
+                const path = `${folder.replace(/\/$/, '')}/${file.replace(/^\//, '')}`;
+                return this.staticImagesBase + path.replace(/^\//, '');
+            }
+            // Fallback to logo
+            const logo = entry.logo as string | undefined;
+            if (logo) {
+                return logo.startsWith('http') ? logo : this.staticImagesBase + logo.replace(/^\//, '');
+            }
+            return null;
+        } catch {
+            return null;
+        }
+    }
+
+    async getTrackMapActiveUrl(trackId: number): Promise<string | null> {
+        try {
+            const assets = await this.getTrackAssets();
+            let entry: any = null;
+            if (Array.isArray(assets)) {
+                entry = assets.find((a: any) => a && (a.track_id === trackId || a.id === trackId));
+            } else if (assets && typeof assets === 'object') {
+                entry = assets[trackId] || Object.values(assets).find((a: any) => a && (a.track_id === trackId || a.id === trackId));
+            }
+            if (!entry) return null;
+            const trackMap: string | undefined = entry.track_map;
+            const layers: any = entry.track_map_layers;
+            const activeName: string = (layers?.active as string) || 'active.svg';
+            if (!trackMap) return null;
+            const base = trackMap.replace(/\/$/, '');
+            const file = activeName.endsWith('.svg') ? activeName : `${activeName}.svg`;
+            return `${base}/${file}`;
+        } catch {
+            return null;
+        }
+    }
+
+    async getCurrentOrNextEventForSeries(seriesId: number): Promise<{ track_id: number; track_name?: string; config_name?: string } | null> {
+        // Preferred strategy: use series/seasons which includes an active 'race_week' and embedded 'schedules'
+        let seasons = await this.getSeriesSeasons(seriesId);
+        const seasonRowsFrom = (data: any) => Array.isArray(data) ? data : (data?.seasons || data?.data || []);
+        const seasonsList: any[] = seasonRowsFrom(seasons) || [];
+        // Filter to this series
+        const bySeries = seasonsList.filter((s: any) => s && (s.series_id === seriesId || (s.series && s.series.series_id === seriesId)));
+        if (bySeries.length > 0) {
+            // Prefer an active season
+            const active = bySeries.find((s: any) => !!s.active) || bySeries[0];
+            const raceWeek = (active.race_week ?? active.race_week_num ?? null);
+            const schedules: any[] = active.schedules || [];
+            if (schedules.length > 0) {
+                // Find schedule for current race week
+                let pick = schedules.find((it: any) => it.race_week_num === raceWeek);
+                if (!pick) {
+                    // fallback to nearest by race_week_num
+                    const sorted = schedules.slice().sort((a: any, b: any) => (a.race_week_num ?? 0) - (b.race_week_num ?? 0));
+                    pick = sorted[0];
+                }
+                if (pick && pick.track && pick.track.track_id) {
+                    return { track_id: pick.track.track_id, track_name: pick.track.track_name, config_name: pick.track.config_name };
+                }
+            }
+        }
+        // Fallback: scan recent quarters using series/season_schedule
+        return await (async () => {
+            const now = new Date();
+            const parseTime = (x: any) => (x ? new Date(x) : null);
+            let fallbackSeasons = seasonsList;
+            if (fallbackSeasons.length === 0) {
+                const currentMonth = now.getUTCMonth();
+                const currentQuarter = Math.floor(currentMonth / 3) + 1;
+                let y = now.getUTCFullYear();
+                let q = currentQuarter;
+                for (let i = 0; i < 8 && fallbackSeasons.length === 0; i++) {
+                    const data = await this.getSeriesSeasonsFor(y, q);
+                    const rows = seasonRowsFrom(data);
+                    const bs = rows.filter((s: any) => s && (s.series_id === seriesId || (s.series && s.series.series_id === seriesId)));
+                    if (bs.length > 0) fallbackSeasons = bs;
+                    q -= 1; if (q < 1) { q = 4; y -= 1; }
+                }
+            }
+            if (fallbackSeasons.length === 0) return null;
+            const seasonId = fallbackSeasons[0].season_id || (fallbackSeasons[0].season && fallbackSeasons[0].season.season_id);
+            if (!seasonId) return null;
+            const schedule = await this.getSeriesSeasonSchedule(seasonId);
+            const items: any[] = Array.isArray(schedule) ? schedule : (schedule.schedule || schedule.data || []);
+            if (!items || items.length === 0) return null;
+            const startOfItem = (it: any) => parseTime(it.start_time || it.start || it.race_week_start);
+            const dated = items.map(it => ({ it, t: startOfItem(it) })).filter(x => x.t);
+            const upcoming = dated.filter(x => x.t!.getTime() > now.getTime()).sort((a, b) => a.t!.getTime() - b.t!.getTime());
+            const pick = upcoming[0]?.it || dated.sort((a, b) => b.t!.getTime() - a.t!.getTime())[0]?.it || items[0];
+            const tr = pick.track || pick;
+            return tr && tr.track_id ? { track_id: tr.track_id, track_name: tr.track_name, config_name: tr.config_name } : null;
+        })();
     }
 }

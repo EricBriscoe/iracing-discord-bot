@@ -154,3 +154,16 @@ cookies.txt
 # iRacing data files
 *.json.map
 *.js.map
+
+# Generated docs and assets
+docs/
+assets/
+
+# Scratch API artifacts
+*raw.json
+*data.json
+seasons_*.json
+schedule_*.json
+race_guide*.json
+payload.json
+auth.json

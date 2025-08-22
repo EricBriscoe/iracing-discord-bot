@@ -1,3 +1,4 @@
+import { AxiosInstance } from 'axios';
 export interface MemberSummary {
     cust_id: number;
     display_name: string;
@@ -108,10 +109,12 @@ export declare class iRacingClient {
     private client;
     private authCookie;
     private loginPromise;
+    private staticImagesBase;
     constructor();
     private login;
     private _performLogin;
     private ensureAuthenticated;
+    getHttpClient(): Promise<AxiosInstance>;
     searchMember(username: string): Promise<number | null>;
     getMemberSummary(customerId: number): Promise<MemberSummary | null>;
     getMemberRecentRaces(customerId: number): Promise<RecentRace[] | null>;
@@ -121,6 +124,19 @@ export declare class iRacingClient {
     formatLapTime(tenThousandths: number): string;
     getMemberBestForTrack(customerId: number, trackId: number, carId?: number): Promise<BestLapTime[]>;
     getSeriesSeasons(seriesId: number): Promise<any>;
+    private getSeriesSeasonsFor;
+    getSeriesSeasonSchedule(seasonId: number): Promise<any>;
     getCurrentSeriesSchedule(seriesId: number): Promise<any>;
+    private fetchMaybeS3;
+    getCarAssets(): Promise<any>;
+    getTrackAssets(): Promise<any>;
+    getCarImageUrl(carId: number): Promise<string | null>;
+    getTrackImageUrl(trackId: number): Promise<string | null>;
+    getTrackMapActiveUrl(trackId: number): Promise<string | null>;
+    getCurrentOrNextEventForSeries(seriesId: number): Promise<{
+        track_id: number;
+        track_name?: string;
+        config_name?: string;
+    } | null>;
 }
 //# sourceMappingURL=iracing-client.d.ts.map
