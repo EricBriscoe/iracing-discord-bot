@@ -6,11 +6,16 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.iRacingClient = void 0;
 const axios_1 = __importDefault(require("axios"));
 const crypto_1 = require("crypto");
+const sharp_1 = __importDefault(require("sharp"));
+const fs_1 = require("fs");
+const path_1 = require("path");
 class iRacingClient {
     constructor() {
         this.authCookie = null;
         this.loginPromise = null;
         this.staticImagesBase = 'https://images-static.iracing.com/';
+        this.worldRecordCache = new Map();
+        this.cacheDir = './data/cache/images';
         this.username = process.env.IRACING_USERNAME || '';
         if (process.env.IRACING_HASHWORD) {
             this.password = process.env.IRACING_HASHWORD;
@@ -76,8 +81,10 @@ class iRacingClient {
             throw new Error(`iRacing login failed: ${error}`);
         }
     }
-    async ensureAuthenticated() {
-        if (!this.authCookie) {
+    async ensureAuthenticated(forceReauth = false) {
+        if (!this.authCookie || forceReauth) {
+            this.authCookie = null;
+            this.loginPromise = null;
             await this.login();
         }
     }
@@ -105,6 +112,31 @@ class iRacingClient {
             return null;
         }
         catch (error) {
+            if (error.response?.status === 401) {
+                console.log('Authentication expired, retrying with fresh login...');
+                try {
+                    await this.ensureAuthenticated(true);
+                    const response = await this.client.get('/data/lookup/drivers', {
+                        params: {
+                            search_term: username
+                        }
+                    });
+                    const results = response.data;
+                    if (results && results.length > 0) {
+                        for (const member of results) {
+                            if (member.display_name.toLowerCase() === username.toLowerCase()) {
+                                return member.cust_id;
+                            }
+                        }
+                        return results[0]?.cust_id || null;
+                    }
+                    return null;
+                }
+                catch (retryError) {
+                    console.error(`Error searching for member ${username} after retry:`, retryError);
+                    return null;
+                }
+            }
             console.error(`Error searching for member ${username}:`, error);
             return null;
         }
@@ -146,10 +178,110 @@ class iRacingClient {
                     cust_id: customerId
                 }
             });
-            return response.data;
+            let data = response.data;
+            if (data.link) {
+                console.log('Fetching recent races from S3 link');
+                const s3Response = await this.client.get(data.link);
+                data = s3Response.data;
+            }
+            if (data.races && Array.isArray(data.races)) {
+                return data.races;
+            }
+            else if (Array.isArray(data)) {
+                return data;
+            }
+            console.warn('Unexpected recent races data format:', typeof data);
+            return null;
         }
         catch (error) {
             console.error(`Error fetching recent races for ${customerId}:`, error);
+            return null;
+        }
+    }
+    async searchSeriesResults(options) {
+        try {
+            await this.ensureAuthenticated();
+            const params = {};
+            if (options.customerId)
+                params.cust_id = options.customerId;
+            if (options.startRangeBegin)
+                params.start_range_begin = options.startRangeBegin;
+            if (options.finishRangeBegin)
+                params.finish_range_begin = options.finishRangeBegin;
+            if (options.seriesId)
+                params.series_id = options.seriesId;
+            if (options.officialOnly !== undefined)
+                params.official_only = options.officialOnly;
+            const response = await this.client.get('/data/results/search_series', { params });
+            let data = response.data;
+            if (data.link) {
+                console.log('Fetching search results from S3 link');
+                const s3Response = await this.client.get(data.link);
+                data = s3Response.data;
+            }
+            if (data.data && data.data.chunk_info) {
+                const chunkInfo = data.data.chunk_info;
+                if (chunkInfo.chunk_file_names && chunkInfo.base_download_url) {
+                    console.log(`Processing ${chunkInfo.num_chunks} chunks with ${chunkInfo.rows} total results`);
+                    const allResults = [];
+                    const baseUrl = chunkInfo.base_download_url.replace(/\/$/, '');
+                    for (const chunkFile of chunkInfo.chunk_file_names) {
+                        try {
+                            const chunkUrl = `${baseUrl}/${chunkFile}`;
+                            const chunkResponse = await this.client.get(chunkUrl);
+                            if (Array.isArray(chunkResponse.data)) {
+                                allResults.push(...chunkResponse.data);
+                            }
+                        }
+                        catch (chunkError) {
+                            console.error('Error fetching chunk:', chunkError);
+                        }
+                    }
+                    return allResults;
+                }
+            }
+            if (Array.isArray(data)) {
+                return data;
+            }
+            console.warn('Unexpected series search data format:', typeof data);
+            return null;
+        }
+        catch (error) {
+            if (error.response?.status === 401) {
+                console.log('Authentication expired for series search, retrying with fresh login...');
+                try {
+                    await this.ensureAuthenticated(true);
+                    return await this.searchSeriesResults(options);
+                }
+                catch (retryError) {
+                    console.error('Error searching series results after retry:', retryError);
+                    return null;
+                }
+            }
+            console.error('Error searching series results:', error);
+            return null;
+        }
+    }
+    async getSubsessionResult(subsessionId) {
+        try {
+            await this.ensureAuthenticated();
+            const response = await this.client.get('/data/results/get', {
+                params: {
+                    subsession_id: subsessionId,
+                    include_licenses: true
+                }
+            });
+            if (response.data.link) {
+                console.log('Fetching subsession result from S3 link');
+                const s3Response = await this.client.get(response.data.link);
+                return s3Response.data;
+            }
+            else {
+                return response.data;
+            }
+        }
+        catch (error) {
+            console.error(`Error fetching subsession result for ${subsessionId}:`, error);
             return null;
         }
     }
@@ -197,6 +329,27 @@ class iRacingClient {
             }
         }
         catch (error) {
+            if (error.response?.status === 401) {
+                console.log('Authentication expired for lap times, retrying with fresh login...');
+                try {
+                    await this.ensureAuthenticated(true);
+                    const params = { cust_id: customerId };
+                    if (carId)
+                        params.car_id = carId;
+                    const response = await this.client.get('/data/stats/member_bests', { params });
+                    if (response.data.link) {
+                        const s3Response = await this.client.get(response.data.link);
+                        return s3Response.data;
+                    }
+                    else {
+                        return response.data;
+                    }
+                }
+                catch (retryError) {
+                    console.error(`Error fetching member best lap times for ${customerId} after retry:`, retryError);
+                    return null;
+                }
+            }
             console.error(`Error fetching member best lap times for ${customerId}:`, error);
             return null;
         }
@@ -212,6 +365,58 @@ class iRacingClient {
         if (!memberBests)
             return [];
         return memberBests.bests.filter(best => best.track.track_id === trackId);
+    }
+    async getWorldRecordBestLap(carId, trackId, opts) {
+        await this.ensureAuthenticated();
+        const includeQualify = opts?.includeQualify !== false;
+        const includeRace = opts?.includeRace !== false;
+        const includeTT = opts?.includeTimeTrial !== false;
+        const includePractice = !!opts?.includePractice;
+        const key = `wr:${carId}:${trackId}:${opts?.seasonYear ?? 'all'}:${opts?.seasonQuarter ?? 'all'}:${includeQualify ? 1 : 0}${includeRace ? 1 : 0}${includeTT ? 1 : 0}${includePractice ? 1 : 0}`;
+        const now = Date.now();
+        const cached = this.worldRecordCache.get(key);
+        if (cached && cached.expiresAt > now) {
+            return cached.value;
+        }
+        const params = { car_id: carId, track_id: trackId };
+        if (typeof opts?.seasonYear === 'number')
+            params.season_year = opts.seasonYear;
+        if (typeof opts?.seasonQuarter === 'number')
+            params.season_quarter = opts.seasonQuarter;
+        const resp = await this.client.get('/data/stats/world_records', { params });
+        const data = resp.data?.data;
+        const meta = data && (data.success !== undefined ? data : resp.data);
+        let best;
+        const consider = (val) => {
+            if (typeof val === 'number' && val > 0) {
+                if (best === undefined || val < best)
+                    best = val;
+            }
+        };
+        if (meta && meta.chunk_info && meta.chunk_info.base_download_url && Array.isArray(meta.chunk_info.chunk_file_names)) {
+            const base = meta.chunk_info.base_download_url.replace(/\/$/, '/');
+            for (const name of meta.chunk_info.chunk_file_names) {
+                try {
+                    const url = base + name;
+                    const chunkResp = await this.client.get(url);
+                    const rows = Array.isArray(chunkResp.data) ? chunkResp.data : [];
+                    for (const row of rows) {
+                        if (includePractice)
+                            consider(row.practice_lap_time);
+                        if (includeQualify)
+                            consider(row.qualify_lap_time);
+                        if (includeTT)
+                            consider(row.tt_lap_time);
+                        if (includeRace)
+                            consider(row.race_lap_time);
+                    }
+                }
+                catch (e) {
+                }
+            }
+        }
+        this.worldRecordCache.set(key, { value: best, expiresAt: now + 15 * 60 * 1000 });
+        return best;
     }
     async getSeriesSeasons(seriesId) {
         try {
@@ -305,6 +510,23 @@ class iRacingClient {
     async getCarAssets() {
         return this.fetchMaybeS3('/data/car/assets');
     }
+    async getCars() {
+        return this.fetchMaybeS3('/data/car/get');
+    }
+    async getCarName(carId) {
+        try {
+            const cars = await this.getCars();
+            if (Array.isArray(cars)) {
+                const car = cars.find((c) => c && c.car_id === carId);
+                return car?.car_name || null;
+            }
+            return null;
+        }
+        catch (error) {
+            console.warn(`Could not fetch car name for car ID ${carId}:`, error);
+            return null;
+        }
+    }
     async getTrackAssets() {
         return this.fetchMaybeS3('/data/track/assets');
     }
@@ -386,6 +608,43 @@ class iRacingClient {
             return `${base}/${file}`;
         }
         catch {
+            return null;
+        }
+    }
+    async getTrackMapActivePng(trackId) {
+        try {
+            const svgUrl = await this.getTrackMapActiveUrl(trackId);
+            if (!svgUrl)
+                return null;
+            const hash = (0, crypto_1.createHash)('sha256').update(svgUrl).digest('hex');
+            const cacheFilename = `${hash}.png`;
+            const cachePath = (0, path_1.join)(this.cacheDir, cacheFilename);
+            try {
+                await fs_1.promises.access(cachePath);
+                return cachePath;
+            }
+            catch {
+            }
+            try {
+                await fs_1.promises.mkdir(this.cacheDir, { recursive: true });
+            }
+            catch (err) {
+                console.warn('Could not create cache directory:', err);
+            }
+            const response = await axios_1.default.get(svgUrl, { responseType: 'arraybuffer' });
+            const svgBuffer = Buffer.from(response.data);
+            const pngBuffer = await (0, sharp_1.default)(svgBuffer)
+                .png()
+                .resize(800, 600, {
+                fit: 'contain',
+                background: { r: 0, g: 0, b: 0, alpha: 0 }
+            })
+                .toBuffer();
+            await fs_1.promises.writeFile(cachePath, pngBuffer);
+            return cachePath;
+        }
+        catch (error) {
+            console.warn('Could not convert track map SVG to PNG:', error);
             return null;
         }
     }

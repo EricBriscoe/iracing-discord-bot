@@ -1,76 +1,29 @@
 "use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 const discord_js_1 = require("discord.js");
 const dotenv_1 = require("dotenv");
 const database_1 = require("./database");
 const iracing_client_1 = require("./iracing-client");
-const leaderboard_embed_builder_1 = require("./leaderboard-embed-builder");
-const axios_1 = __importDefault(require("axios"));
-const sharp_1 = __importDefault(require("sharp"));
-const fs = __importStar(require("fs/promises"));
-const path = __importStar(require("path"));
-const crypto_1 = require("crypto");
 (0, dotenv_1.config)();
 class iRacingBot {
     constructor() {
         this.seriesUpdateInterval = null;
-        this.channelMessageMap = new Map();
-        this.memoryImageCache = new Map();
+        this.raceResultUpdateInterval = null;
         this.client = new discord_js_1.Client({
             intents: [discord_js_1.GatewayIntentBits.Guilds]
         });
         this.db = new database_1.Database();
         this.iracing = new iracing_client_1.iRacingClient();
-        this.embedBuilder = new leaderboard_embed_builder_1.LeaderboardEmbedBuilder();
-        this.imageCacheDir = path.resolve('data/cache/images');
         this.setupEventHandlers();
     }
     setupEventHandlers() {
         this.client.once('ready', async () => {
             console.log(`${this.client.user?.tag} has connected to Discord!`);
             await this.db.initDb();
-            await this.ensureImageCacheDir();
             await this.registerSlashCommands();
             await this.updateOfficialSeries();
-            await this.prepareTrackedChannelsOnStartup();
             this.startSeriesUpdateTimer();
-            this.startLapTimeUpdateTimer();
+            this.startRaceResultUpdateTimer();
         });
         this.client.on('interactionCreate', async (interaction) => {
             if (interaction.isChatInputCommand()) {
@@ -82,11 +35,8 @@ class iRacingBot {
                         case 'unlink':
                             await this.handleUnlinkCommand(interaction);
                             break;
-                        case 'track':
-                            await this.handleTrackCommand(interaction);
-                            break;
-                        case 'untrack':
-                            await this.handleUntrackCommand(interaction);
+                        case 'race-log':
+                            await this.handleRaceLogCommand(interaction);
                             break;
                     }
                 }
@@ -98,16 +48,6 @@ class iRacingBot {
                     catch (replyError) {
                         console.error('Failed to send error message:', replyError);
                     }
-                }
-            }
-            else if (interaction.isAutocomplete()) {
-                try {
-                    if (interaction.commandName === 'track') {
-                        await this.handleTrackAutocomplete(interaction);
-                    }
-                }
-                catch (error) {
-                    console.error('Error handling autocomplete:', error);
                 }
             }
         });
@@ -130,15 +70,8 @@ class iRacingBot {
                 .setDescription('User to unlink (admin only - leave blank to unlink yourself)')
                 .setRequired(false)),
             new discord_js_1.SlashCommandBuilder()
-                .setName('track')
-                .setDescription('Set this channel to display top lap times for an official series')
-                .addStringOption(option => option.setName('series')
-                .setDescription('Select an official iRacing series')
-                .setRequired(true)
-                .setAutocomplete(true)),
-            new discord_js_1.SlashCommandBuilder()
-                .setName('untrack')
-                .setDescription('Remove series tracking from this channel')
+                .setName('race-log')
+                .setDescription('Set this channel to receive race result notifications for tracked members')
         ];
         try {
             console.log('Registering slash commands...');
@@ -174,7 +107,6 @@ class iRacingBot {
             }
             const userToLink = targetUser || interaction.user;
             const memberInfo = await this.iracing.getMemberSummary(customerId);
-            console.log('Member info response:', memberInfo);
             if (!memberInfo) {
                 await interaction.editReply({ content: `❌ Could not find iRacing member with Customer ID: ${customerId}` });
                 return;
@@ -221,53 +153,35 @@ class iRacingBot {
             await interaction.reply({ content: '❌ An error occurred while unlinking the account.', flags: [discord_js_1.MessageFlags.Ephemeral] });
         }
     }
-    async handleUntrackCommand(interaction) {
+    async handleRaceLogCommand(interaction) {
         try {
             await interaction.deferReply();
             if (!interaction.channel) {
                 await interaction.editReply({ content: '❌ This command must be used in a channel.' });
                 return;
             }
-            const channelTrack = await this.db.getChannelTrack(interaction.channel.id);
-            if (!channelTrack) {
-                await interaction.editReply({ content: '❌ This channel is not currently tracking any series.' });
+            if (!this.isServerAdmin(interaction)) {
+                await interaction.editReply({ content: '❌ Only server administrators can set race log channels.' });
                 return;
             }
-            const wasRemoved = await this.db.removeChannelTrack(interaction.channel.id);
-            if (wasRemoved) {
-                if (interaction.channel instanceof discord_js_1.TextChannel) {
-                    try {
-                        console.log(`Clearing messages in channel ${interaction.channel.name} after untracking`);
-                        const messages = await interaction.channel.messages.fetch({ limit: 100 });
-                        const messagesToDelete = messages.filter(msg => !msg.pinned && msg.id !== interaction.id);
-                        if (messagesToDelete.size > 0) {
-                            await interaction.channel.bulkDelete(messagesToDelete, true);
-                            console.log(`Deleted ${messagesToDelete.size} messages from untracked channel`);
-                        }
-                    }
-                    catch (error) {
-                        console.error('Error clearing channel messages:', error);
-                    }
-                }
-                await interaction.editReply({
-                    content: `✅ Removed series tracking from this channel.\n\n**${channelTrack.series_name}** is no longer being tracked here. All leaderboard messages have been cleared.`
-                });
+            const existingRaceLogChannel = await this.db.getRaceLogChannel(interaction.channel.id);
+            if (existingRaceLogChannel) {
+                await interaction.editReply({ content: '❌ This channel is already configured as a race log channel.' });
+                return;
             }
-            else {
-                await interaction.editReply({ content: '❌ Failed to remove channel tracking.' });
-            }
+            await this.db.setRaceLogChannel(interaction.channel.id, interaction.guildId);
+            const embed = new discord_js_1.EmbedBuilder()
+                .setTitle('🏁 Race Log Channel Configured')
+                .setDescription('This channel will now receive race result notifications for all tracked guild members.')
+                .setColor(0x00AE86)
+                .addFields({ name: 'What happens next?', value: 'New race results for linked members will be posted here automatically.' }, { name: 'How to link members?', value: 'Use `/link` command to link Discord accounts to iRacing accounts.' })
+                .setTimestamp();
+            await interaction.editReply({ embeds: [embed] });
         }
         catch (error) {
-            console.error('Error removing channel track:', error);
-            await interaction.editReply({ content: '❌ An error occurred while removing channel tracking.' });
+            console.error('Error setting race log channel:', error);
+            await interaction.editReply({ content: '❌ An error occurred while setting up the race log channel.' });
         }
-    }
-    async start() {
-        const token = process.env.DISCORD_TOKEN;
-        if (!token) {
-            throw new Error('DISCORD_TOKEN environment variable not set');
-        }
-        await this.client.login(token);
     }
     async updateOfficialSeries() {
         try {
@@ -295,332 +209,226 @@ class iRacingBot {
             await this.updateOfficialSeries();
         }, 24 * 60 * 60 * 1000);
     }
-    startLapTimeUpdateTimer() {
-        setInterval(async () => {
-            await this.updateChannelLapTimes();
-        }, 60 * 60 * 1000);
+    startRaceResultUpdateTimer() {
+        this.raceResultUpdateInterval = setInterval(async () => {
+            await this.checkForNewRaceResults();
+        }, 10 * 60 * 1000);
         setTimeout(async () => {
-            await this.updateChannelLapTimes();
+            await this.checkForNewRaceResults();
         }, 30000);
     }
-    async prepareTrackedChannelsOnStartup() {
+    async checkForNewRaceResults() {
+        console.log('Checking for new race results...');
         try {
-            const trackedChannels = await this.db.getAllChannelTracks();
-            for (const channelTrack of trackedChannels) {
-                const channel = await this.client.channels.fetch(channelTrack.channel_id);
-                if (!channel || !(channel instanceof discord_js_1.TextChannel))
-                    continue;
-                try {
-                    const messages = await channel.messages.fetch({ limit: 100 });
-                    const messagesToDelete = messages.filter(m => !m.pinned);
-                    if (messagesToDelete.size > 0) {
-                        await channel.bulkDelete(messagesToDelete, true);
-                        console.log(`Startup: deleted ${messagesToDelete.size} messages in #${channel.name}`);
-                    }
+            const linkedUsers = await this.db.getAllLinkedUsers();
+            for (const user of linkedUsers) {
+                if (user.iracing_customer_id) {
+                    await this.updateRaceResultsForUser(user);
                 }
-                catch (err) {
-                    console.error('Error clearing channel on startup:', err);
-                }
-                const baseEmbeds = this.embedBuilder.build(channelTrack.series_name, []);
-                const msg = await channel.send({ embeds: baseEmbeds.slice(0, 10) });
-                this.channelMessageMap.set(channel.id, msg.id);
             }
+            console.log('Race result check completed');
         }
         catch (error) {
-            console.error('Error preparing tracked channels on startup:', error);
+            console.error('Error during race result check:', error);
         }
     }
-    async handleTrackAutocomplete(interaction) {
-        const focusedValue = interaction.options.getFocused().toLowerCase();
-        const allSeries = await this.db.getOfficialSeries();
-        const filtered = allSeries
-            .filter(series => series.series_name.toLowerCase().includes(focusedValue) ||
-            series.series_short_name.toLowerCase().includes(focusedValue) ||
-            series.category.toLowerCase().includes(focusedValue))
-            .slice(0, 25)
-            .map(series => ({
-            name: `${series.series_name} (${series.category})`,
-            value: series.series_id.toString()
-        }));
-        await interaction.respond(filtered);
-    }
-    async handleTrackCommand(interaction) {
-        const seriesId = parseInt(interaction.options.getString('series', true));
+    async updateRaceResultsForUser(user) {
         try {
-            await interaction.deferReply();
-            const allSeries = await this.db.getOfficialSeries();
-            const selectedSeries = allSeries.find(s => s.series_id === seriesId);
-            if (!selectedSeries) {
-                await interaction.editReply({ content: '❌ Invalid series selected. Please use the autocomplete to select a valid series.' });
-                return;
-            }
-            if (!interaction.channel) {
-                await interaction.editReply({ content: '❌ This command must be used in a channel.' });
-                return;
-            }
-            await this.db.setChannelTrack(interaction.channel.id, interaction.guildId, selectedSeries.series_id, selectedSeries.series_name);
-            const response = `✅ This channel is now tracking **${selectedSeries.series_name}** lap times.\n\nChannel messages will be cleared and lap time leaderboards will appear here for tracked events.`;
-            await interaction.editReply({ content: response });
-            if (interaction.channel instanceof discord_js_1.TextChannel) {
-                try {
-                    console.log(`Clearing messages in channel ${interaction.channel.name} for series tracking`);
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                    const messages = await interaction.channel.messages.fetch({ limit: 100 });
-                    const messagesToDelete = messages.filter(msg => !msg.pinned);
-                    if (messagesToDelete.size > 0) {
-                        await interaction.channel.bulkDelete(messagesToDelete, true);
-                        console.log(`Deleted ${messagesToDelete.size} messages from tracked channel`);
+            const recentRaces = await this.iracing.getMemberRecentRaces(user.iracing_customer_id);
+            if (recentRaces && recentRaces.length > 0) {
+                for (const race of recentRaces) {
+                    const exists = await this.db.getRaceResultExists(race.subsession_id, user.discord_id);
+                    if (!exists) {
+                        await this.processNewRaceResult(race, user);
                     }
-                    await this.postTrackingMessage(interaction.channel.id, selectedSeries.series_name);
-                }
-                catch (error) {
-                    console.error('Error clearing channel messages:', error);
                 }
             }
         }
         catch (error) {
-            console.error('Error setting channel track:', error);
-            await interaction.editReply({ content: '❌ An error occurred while setting up channel tracking.' });
+            console.error(`Error updating race results for user ${user.iracing_username}:`, error);
         }
     }
-    async updateChannelLapTimes() {
-        console.log('Starting lap time update cycle...');
+    async processNewRaceResult(raceData, user) {
         try {
-            const trackedChannels = await this.db.getAllChannelTracks();
-            for (const channelTrack of trackedChannels) {
-                console.log(`Updating lap times for channel ${channelTrack.channel_id}, series: ${channelTrack.series_name}`);
-                await this.updateChannelWithCommonCombos(channelTrack);
+            let carName = raceData.car_name;
+            if (!carName && raceData.car_id) {
+                carName = await this.iracing.getCarName(raceData.car_id);
             }
-            console.log('Lap time update cycle completed');
+            if (!carName) {
+                carName = 'Unknown Car';
+            }
+            const raceResult = {
+                subsession_id: raceData.subsession_id,
+                discord_id: user.discord_id,
+                iracing_customer_id: user.iracing_customer_id,
+                iracing_username: user.iracing_username,
+                series_id: raceData.series_id,
+                series_name: raceData.series_name,
+                track_id: raceData.track.track_id,
+                track_name: raceData.track.track_name,
+                config_name: raceData.track.config_name || '',
+                car_id: raceData.car_id,
+                car_name: carName,
+                start_time: raceData.session_start_time,
+                finish_position: raceData.finish_position,
+                starting_position: raceData.start_position,
+                incidents: raceData.incidents,
+                irating_before: raceData.oldi_rating,
+                irating_after: raceData.newi_rating,
+                license_level_before: raceData.old_sub_level,
+                license_level_after: raceData.new_sub_level,
+                event_type: 'Race',
+                official_session: true,
+                created_at: new Date().toISOString(),
+                last_updated: new Date().toISOString()
+            };
+            await this.db.upsertRaceResult(raceResult);
+            await this.postRaceResultToChannels(raceResult, raceData);
+            console.log(`Processed new race result for ${user.iracing_username}: ${raceResult.series_name} - P${raceResult.finish_position}`);
         }
         catch (error) {
-            console.error('Error during lap time update cycle:', error);
+            console.error(`Error processing race result for ${user.iracing_username}:`, error);
         }
     }
-    async updateChannelWithCommonCombos(channelTrack) {
+    getEventTypeName(eventType) {
+        const eventTypes = {
+            2: 'Practice',
+            3: 'Qualifying',
+            4: 'Time Trial',
+            5: 'Race'
+        };
+        return eventTypes[eventType] || 'Unknown';
+    }
+    async postRaceResultToChannels(raceResult, raceData) {
         try {
-            console.log(`Processing series ${channelTrack.series_id} (${channelTrack.series_name})`);
-            const existingCombos = await this.db.getTrackCarCombosBySeriesId(channelTrack.series_id);
-            if (existingCombos && existingCombos.length > 0) {
-                console.log(`Found ${existingCombos.length} existing track/car combinations for series ${channelTrack.series_id}`);
-                const currentTrack = await this.iracing.getCurrentOrNextEventForSeries(channelTrack.series_id);
-                let combosToProcess = existingCombos;
-                if (currentTrack?.track_id) {
-                    combosToProcess = existingCombos.filter(c => c.track_id === currentTrack.track_id && (!currentTrack.config_name || c.config_name === currentTrack.config_name));
-                    console.log(`Filtered to ${combosToProcess.length} combos for current track_id=${currentTrack.track_id}`);
+            const raceLogChannels = await this.db.getAllRaceLogChannels();
+            for (const logChannel of raceLogChannels) {
+                const channel = await this.client.channels.fetch(logChannel.channel_id);
+                if (channel && channel instanceof discord_js_1.TextChannel) {
+                    const { embed, attachment } = await this.createRaceResultEmbed(raceResult, raceData);
+                    const messageOptions = { embeds: [embed] };
+                    if (attachment) {
+                        messageOptions.files = [attachment];
+                    }
+                    await channel.send(messageOptions);
                 }
-                else {
-                    console.log('No current track found for series; ignoring old combos');
-                    combosToProcess = [];
-                }
-                const leaderboards = [];
-                for (const combo of combosToProcess) {
-                    await this.updateLapTimesForCombo(combo.id, combo);
-                    const topTimes = await this.db.getTopLapTimesForCombo(combo.id, 10);
-                    let benchmark;
-                    try {
-                        benchmark = await this.getBenchmarkForCombo(combo);
-                    }
-                    catch (e) {
-                        console.warn('Benchmark resolution failed:', e);
-                    }
-                    if (topTimes.length > 0) {
-                        leaderboards.push({
-                            combo: combo,
-                            times: topTimes,
-                            benchmarkTime: benchmark
-                        });
-                    }
-                    else {
-                        if (benchmark) {
-                            leaderboards.push({ combo, times: [], benchmarkTime: benchmark });
-                        }
-                    }
-                }
-                let embedOptions = await this.resolveEmbedImagesForCurrent(combosToProcess);
-                if (currentTrack?.track_id && combosToProcess.length === 0) {
-                    try {
-                        const [trackUrl, mapActiveUrl] = await Promise.all([
-                            this.iracing.getTrackImageUrl(currentTrack.track_id),
-                            this.iracing.getTrackMapActiveUrl(currentTrack.track_id)
-                        ]);
-                        if (trackUrl)
-                            embedOptions.trackImageUrl = trackUrl;
-                        if (mapActiveUrl)
-                            embedOptions.trackMapActiveUrl = mapActiveUrl;
-                    }
-                    catch { }
-                }
-                await this.updateChannelSingleMessage(channelTrack.channel_id, channelTrack.series_name, leaderboards, embedOptions);
-                console.log(`Updated consolidated message for series ${channelTrack.series_name}`);
-                return;
             }
-            console.log(`No existing combinations found for series ${channelTrack.series_id}, posting tracking message`);
-            await this.postTrackingMessage(channelTrack.channel_id, channelTrack.series_name);
         }
         catch (error) {
-            console.error(`Error updating channel with combos for ${channelTrack.series_name}:`, error);
+            console.error('Error posting race result to channels:', error);
         }
     }
-    async updateChannelSingleMessage(channelId, seriesName, leaderboards, options) {
+    async createRaceResultEmbed(result, raceData) {
+        const embed = new discord_js_1.EmbedBuilder()
+            .setTitle(`🏁 ${result.series_name}`)
+            .setColor(this.getPositionColor(result.finish_position))
+            .setTimestamp(new Date(result.start_time));
+        let attachment;
         try {
-            const channel = await this.client.channels.fetch(channelId);
-            if (!channel || !(channel instanceof discord_js_1.TextChannel))
-                return;
-            let files;
-            let embedOptions = options;
-            if (options?.trackMapActiveUrl && !options.trackMapActiveUrl.startsWith('attachment://')) {
-                try {
-                    const png = await this.getRasterizedPng(options.trackMapActiveUrl);
-                    const attachmentName = 'track-map.png';
-                    files = [new discord_js_1.AttachmentBuilder(png, { name: attachmentName })];
-                    embedOptions = { ...options, trackMapActiveUrl: `attachment://${attachmentName}` };
-                }
-                catch (e) {
-                    console.warn('Failed to rasterize SVG, falling back to remote URL:', e);
-                }
+            const trackMapPath = await this.iracing.getTrackMapActivePng(result.track_id);
+            if (trackMapPath) {
+                attachment = new discord_js_1.AttachmentBuilder(trackMapPath, { name: 'track-map.png' });
+                embed.setImage('attachment://track-map.png');
             }
-            const embeds = this.embedBuilder.build(seriesName, leaderboards, embedOptions);
-            const messageId = this.channelMessageMap.get(channelId);
-            if (messageId) {
-                try {
-                    const msg = await channel.messages.fetch(messageId);
-                    await msg.edit({ embeds: embeds.slice(0, 10), files });
-                    return;
-                }
-                catch (e) {
-                    console.warn(`Failed to fetch/edit existing message ${messageId} in ${channelId}, sending new one.`, e);
-                    this.channelMessageMap.delete(channelId);
-                }
-            }
-            const newMsg = await channel.send({ embeds: embeds.slice(0, 10), files });
-            this.channelMessageMap.set(channelId, newMsg.id);
         }
         catch (error) {
-            console.error(`Error updating consolidated message in channel ${channelId}:`, error);
+            console.warn('Could not fetch track map:', error);
         }
+        try {
+            const carImageUrl = await this.iracing.getCarImageUrl(raceData.car_id);
+            if (carImageUrl) {
+                embed.setThumbnail(carImageUrl);
+            }
+        }
+        catch (error) {
+            console.warn('Could not fetch car image:', error);
+        }
+        embed.addFields({ name: '🏃 Driver', value: `<@${result.discord_id}> (${result.iracing_username})`, inline: true }, { name: '🏁 Track', value: `${result.track_name}${result.config_name ? ` (${result.config_name})` : ''}`, inline: true }, { name: '🏎️ Car', value: result.car_name, inline: true });
+        const startPos = result.starting_position || raceData.start_position;
+        const finishPos = result.finish_position;
+        const positionChange = startPos ? (startPos - finishPos) : 0;
+        const positionChangeStr = positionChange === 0 ? '=' : positionChange > 0 ? `+${positionChange}` : positionChange.toString();
+        embed.addFields({ name: '🚦 Starting Position', value: (startPos || 'Unknown').toString(), inline: true }, { name: '🏆 Finishing Position', value: `${finishPos}${this.getOrdinalSuffix(finishPos)}`, inline: true }, { name: '📈 Position Change', value: positionChangeStr, inline: true });
+        embed.addFields({ name: '⚠️ Incidents', value: result.incidents.toString(), inline: true }, { name: '🏁 Laps', value: `${raceData.laps || 'Unknown'}`, inline: true }, { name: '🎯 Strength of Field', value: (raceData.strength_of_field || 'Unknown').toString(), inline: true });
+        const lapTimeFields = await this.getLapTimeFields(result.subsession_id, result.iracing_customer_id);
+        if (lapTimeFields.length > 0) {
+            embed.addFields(...lapTimeFields);
+        }
+        if (raceData.qualifying_time && raceData.qualifying_time > 0) {
+            const qualifyingTime = this.iracing.formatLapTime(raceData.qualifying_time);
+            embed.addFields({ name: '⏱️ Qualifying Time', value: qualifyingTime, inline: true });
+        }
+        if (result.irating_before && result.irating_after) {
+            const iRatingChange = result.irating_after - result.irating_before;
+            const changeStr = iRatingChange >= 0 ? `+${iRatingChange}` : iRatingChange.toString();
+            embed.addFields({
+                name: '📊 iRating Change',
+                value: `${result.irating_before} → ${result.irating_after} (${changeStr})`,
+                inline: true
+            });
+        }
+        if (raceData.points) {
+            embed.addFields({ name: '🏆 Points Earned', value: raceData.points.toString(), inline: true });
+        }
+        return { embed, attachment };
     }
-    async updateLapTimesForCombo(comboId, combo) {
-        const guildUsers = await this.db.getAllLinkedUsers();
-        for (const user of guildUsers) {
-            if (user.iracing_customer_id) {
-                try {
-                    const bestTimes = await this.iracing.getMemberBestForTrack(user.iracing_customer_id, combo.track_id, combo.car_id);
-                    if (bestTimes.length > 0) {
-                        const bestTime = bestTimes[0];
-                        if (bestTime) {
-                            const record = {
-                                combo_id: comboId,
-                                discord_id: user.discord_id,
-                                iracing_customer_id: user.iracing_customer_id,
-                                iracing_username: user.iracing_username,
-                                lap_time_microseconds: bestTime.best_lap_time,
-                                subsession_id: bestTime.subsession_id,
-                                event_type: bestTime.event_type,
-                                recorded_at: bestTime.end_time,
-                                last_updated: new Date().toISOString()
-                            };
-                            await this.db.upsertLapTimeRecord(record);
-                        }
-                    }
+    async getLapTimeFields(subsessionId, customerId) {
+        try {
+            const subsessionDetail = await this.iracing.getSubsessionResult(subsessionId);
+            if (!subsessionDetail)
+                return [];
+            const fields = [];
+            const userResult = subsessionDetail.session_results?.[0]?.results?.find((r) => r.cust_id === customerId);
+            if (userResult) {
+                if (userResult.best_qual_lap_time && userResult.best_qual_lap_time > 0) {
+                    const qualTime = this.iracing.formatLapTime(userResult.best_qual_lap_time);
+                    fields.push({ name: '🏃 Best Qualifying Lap', value: qualTime, inline: true });
                 }
-                catch (error) {
-                    console.error(`Error updating lap times for user ${user.iracing_username}:`, error);
-                }
-            }
-        }
-    }
-    async postTrackingMessage(channelId, seriesName) {
-        const embedOptions = await this.resolveEmbedImagesForCurrent([]);
-        await this.updateChannelSingleMessage(channelId, seriesName, [], embedOptions);
-        console.log(`Ensured base tracking message for series ${seriesName}`);
-    }
-    async resolveEmbedImagesForCurrent(combos) {
-        const opts = {};
-        try {
-            if (combos.length > 0) {
-                const first = combos[0];
-                const tId = first.track_id;
-                const [trackUrl, mapActiveUrl] = await Promise.all([
-                    this.iracing.getTrackImageUrl(tId),
-                    this.iracing.getTrackMapActiveUrl(tId)
-                ]);
-                if (trackUrl)
-                    opts.trackImageUrl = trackUrl;
-                if (mapActiveUrl)
-                    opts.trackMapActiveUrl = mapActiveUrl;
-                const cId = first.car_id;
-                const carUrl = await this.iracing.getCarImageUrl(cId);
-                if (carUrl)
-                    opts.carImageUrl = carUrl;
-            }
-            else {
-            }
-        }
-        catch (e) {
-            console.warn('Failed to resolve embed images:', e);
-        }
-        return opts;
-    }
-    async ensureImageCacheDir() {
-        try {
-            await fs.mkdir(this.imageCacheDir, { recursive: true });
-        }
-        catch { }
-    }
-    hashUrl(url) {
-        return (0, crypto_1.createHash)('sha256').update(url).digest('hex');
-    }
-    async getRasterizedPng(svgUrl) {
-        const key = this.hashUrl(svgUrl);
-        const inMem = this.memoryImageCache.get(key);
-        if (inMem)
-            return inMem;
-        await this.ensureImageCacheDir();
-        const filePath = path.join(this.imageCacheDir, `${key}.png`);
-        try {
-            const onDisk = await fs.readFile(filePath);
-            this.memoryImageCache.set(key, onDisk);
-            return onDisk;
-        }
-        catch { }
-        const res = await axios_1.default.get(svgUrl, { responseType: 'arraybuffer' });
-        const input = Buffer.from(res.data);
-        const png = await (0, sharp_1.default)(input, { density: 300 })
-            .png({ compressionLevel: 9 })
-            .resize({ width: 1280, withoutEnlargement: true })
-            .toBuffer();
-        try {
-            await fs.writeFile(filePath, png);
-        }
-        catch { }
-        this.memoryImageCache.set(key, png);
-        return png;
-    }
-    async getBenchmarkForCombo(combo) {
-        const proListEnv = process.env.PRO_CUST_IDS || '168966';
-        const ids = proListEnv.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
-        if (ids.length === 0)
-            return undefined;
-        let best;
-        for (const custId of ids) {
-            try {
-                const bests = await this.iracing.getMemberBestForTrack(custId, combo.track_id, combo.car_id);
-                for (const b of bests) {
-                    if (typeof b.best_lap_time === 'number') {
-                        if (best === undefined || b.best_lap_time < best)
-                            best = b.best_lap_time;
-                    }
+                if (userResult.best_lap_time && userResult.best_lap_time > 0) {
+                    const raceTime = this.iracing.formatLapTime(userResult.best_lap_time);
+                    fields.push({ name: '⚡ Best Race Lap', value: raceTime, inline: true });
                 }
             }
-            catch (e) {
-            }
+            return fields;
         }
-        return best;
+        catch (error) {
+            console.warn('Could not fetch lap time data:', error);
+            return [];
+        }
+    }
+    getPositionColor(position) {
+        if (position === 1)
+            return 0xFFD700;
+        if (position <= 3)
+            return 0xC0C0C0;
+        if (position <= 10)
+            return 0xCD7F32;
+        return 0x808080;
+    }
+    getOrdinalSuffix(num) {
+        const j = num % 10;
+        const k = num % 100;
+        if (j === 1 && k !== 11)
+            return 'st';
+        if (j === 2 && k !== 12)
+            return 'nd';
+        if (j === 3 && k !== 13)
+            return 'rd';
+        return 'th';
+    }
+    async start() {
+        const token = process.env.DISCORD_TOKEN;
+        if (!token) {
+            throw new Error('DISCORD_TOKEN environment variable not set');
+        }
+        await this.client.login(token);
     }
     async stop() {
         if (this.seriesUpdateInterval) {
             clearInterval(this.seriesUpdateInterval);
+        }
+        if (this.raceResultUpdateInterval) {
+            clearInterval(this.raceResultUpdateInterval);
         }
         this.db.close();
         await this.client.destroy();

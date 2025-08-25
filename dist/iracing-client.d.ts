@@ -103,6 +103,14 @@ export interface MemberBests {
     cars_driven: CarInfo[];
     bests: BestLapTime[];
 }
+export interface WorldRecordOptions {
+    seasonYear?: number;
+    seasonQuarter?: number;
+    includeQualify?: boolean;
+    includeRace?: boolean;
+    includeTimeTrial?: boolean;
+    includePractice?: boolean;
+}
 export declare class iRacingClient {
     private username;
     private password;
@@ -110,6 +118,8 @@ export declare class iRacingClient {
     private authCookie;
     private loginPromise;
     private staticImagesBase;
+    private worldRecordCache;
+    private readonly cacheDir;
     constructor();
     private login;
     private _performLogin;
@@ -118,21 +128,33 @@ export declare class iRacingClient {
     searchMember(username: string): Promise<number | null>;
     getMemberSummary(customerId: number): Promise<MemberSummary | null>;
     getMemberRecentRaces(customerId: number): Promise<RecentRace[] | null>;
+    searchSeriesResults(options: {
+        customerId?: number;
+        startRangeBegin?: string;
+        finishRangeBegin?: string;
+        seriesId?: number;
+        officialOnly?: boolean;
+    }): Promise<any[] | null>;
+    getSubsessionResult(subsessionId: number): Promise<any | null>;
     getSeries(): Promise<Series[] | null>;
     getOfficialSeries(): Promise<Series[] | null>;
     getMemberBestLapTimes(customerId: number, carId?: number): Promise<MemberBests | null>;
     formatLapTime(tenThousandths: number): string;
     getMemberBestForTrack(customerId: number, trackId: number, carId?: number): Promise<BestLapTime[]>;
+    getWorldRecordBestLap(carId: number, trackId: number, opts?: WorldRecordOptions): Promise<number | undefined>;
     getSeriesSeasons(seriesId: number): Promise<any>;
     private getSeriesSeasonsFor;
     getSeriesSeasonSchedule(seasonId: number): Promise<any>;
     getCurrentSeriesSchedule(seriesId: number): Promise<any>;
     private fetchMaybeS3;
     getCarAssets(): Promise<any>;
+    getCars(): Promise<any>;
+    getCarName(carId: number): Promise<string | null>;
     getTrackAssets(): Promise<any>;
     getCarImageUrl(carId: number): Promise<string | null>;
     getTrackImageUrl(trackId: number): Promise<string | null>;
     getTrackMapActiveUrl(trackId: number): Promise<string | null>;
+    getTrackMapActivePng(trackId: number): Promise<string | null>;
     getCurrentOrNextEventForSeries(seriesId: number): Promise<{
         track_id: number;
         track_name?: string;

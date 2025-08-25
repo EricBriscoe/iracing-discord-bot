@@ -408,6 +408,16 @@ class iRacingBot {
             console.warn('Could not fetch track map:', error);
         }
 
+        // Add car image as thumbnail if available
+        try {
+            const carImageUrl = await this.iracing.getCarImageUrl(raceData.car_id);
+            if (carImageUrl) {
+                embed.setThumbnail(carImageUrl);
+            }
+        } catch (error) {
+            console.warn('Could not fetch car image:', error);
+        }
+
         // Driver and basic info
         embed.addFields(
             { name: '🏃 Driver', value: `<@${result.discord_id}> (${result.iracing_username})`, inline: true },

@@ -29,17 +29,36 @@ export interface TrackCarCombo {
     car_name: string;
     last_updated: string;
 }
-export interface LapTimeRecord {
+export interface RaceResult {
     id?: number;
-    combo_id: number;
+    subsession_id: number;
     discord_id: string;
     iracing_customer_id: number;
     iracing_username: string;
-    lap_time_microseconds: number;
-    subsession_id: number;
+    series_id: number;
+    series_name: string;
+    track_id: number;
+    track_name: string;
+    config_name: string;
+    car_id: number;
+    car_name: string;
+    start_time: string;
+    finish_position: number;
+    starting_position?: number;
+    incidents: number;
+    irating_before?: number;
+    irating_after?: number;
+    license_level_before?: number;
+    license_level_after?: number;
     event_type: string;
-    recorded_at: string;
+    official_session: boolean;
+    created_at: string;
     last_updated: string;
+}
+export interface RaceLogChannel {
+    channel_id: string;
+    guild_id: string;
+    created_at: string;
 }
 export declare class Database {
     private db;
@@ -59,8 +78,14 @@ export declare class Database {
     getAllChannelTracks(): Promise<ChannelTrack[]>;
     upsertTrackCarCombo(combo: TrackCarCombo): Promise<number>;
     getTrackCarCombosBySeriesId(seriesId: number): Promise<TrackCarCombo[]>;
-    upsertLapTimeRecord(record: LapTimeRecord): Promise<void>;
-    getTopLapTimesForCombo(comboId: number, limit?: number): Promise<LapTimeRecord[]>;
+    setRaceLogChannel(channelId: string, guildId: string): Promise<void>;
+    getRaceLogChannel(channelId: string): Promise<RaceLogChannel | null>;
+    getAllRaceLogChannels(): Promise<RaceLogChannel[]>;
+    removeRaceLogChannel(channelId: string): Promise<boolean>;
+    upsertRaceResult(result: RaceResult): Promise<void>;
+    getRecentRaceResults(discordId: string, limit?: number): Promise<RaceResult[]>;
+    getRaceResultExists(subsessionId: number, discordId: string): Promise<boolean>;
+    getLatestRaceResultTime(discordId: string): Promise<string | null>;
     close(): void;
 }
 //# sourceMappingURL=database.d.ts.map
