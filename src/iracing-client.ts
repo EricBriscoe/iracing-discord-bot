@@ -1,5 +1,8 @@
 import axios, { AxiosInstance } from 'axios';
 import { createHash } from 'crypto';
+import sharp from 'sharp';
+import { promises as fs } from 'fs';
+import { join } from 'path';
 
 export interface MemberSummary {
     cust_id: number;
@@ -117,6 +120,34 @@ export interface MemberBests {
     bests: BestLapTime[];
 }
 
+// World Records types
+interface WorldRecordsChunkInfo {
+    chunk_size: number;
+    num_chunks: number;
+    rows: number;
+    base_download_url: string;
+    chunk_file_names: string[];
+}
+
+interface WorldRecordsMeta {
+    success: boolean;
+    car_id: number;
+    track_id: number;
+    season_year?: number | null;
+    season_quarter?: number | null;
+    chunk_info: WorldRecordsChunkInfo | null;
+    last_updated?: string;
+}
+
+export interface WorldRecordOptions {
+    seasonYear?: number;
+    seasonQuarter?: number;
+    includeQualify?: boolean; // default true
+    includeRace?: boolean;    // default true
+    includeTimeTrial?: boolean; // default true
+    includePractice?: boolean;  // default false
+}
+
 export class iRacingClient {
     private username: string;
     private password: string;
@@ -124,6 +155,8 @@ export class iRacingClient {
     private authCookie: string | null = null;
     private loginPromise: Promise<void> | null = null;
     private staticImagesBase = 'https://images-static.iracing.com/';
+    private worldRecordCache = new Map<string, { value: number | undefined; expiresAt: number }>();
+    private readonly cacheDir = './data/cache/images';
 
     constructor() {
         this.username = process.env.IRACING_USERNAME || '';
@@ -317,9 +350,128 @@ export class iRacingClient {
                 }
             });
 
-            return response.data as RecentRace[];
+            let data = response.data;
+            
+            // Check if response contains a link to S3 data
+            if (data.link) {
+                console.log('Fetching recent races from S3 link');
+                const s3Response = await this.client.get(data.link);
+                data = s3Response.data;
+            }
+            
+            // Handle the actual data structure - races are in a 'races' property
+            if (data.races && Array.isArray(data.races)) {
+                return data.races as RecentRace[];
+            } else if (Array.isArray(data)) {
+                return data as RecentRace[];
+            }
+            
+            console.warn('Unexpected recent races data format:', typeof data);
+            return null;
         } catch (error) {
             console.error(`Error fetching recent races for ${customerId}:`, error);
+            return null;
+        }
+    }
+
+    async searchSeriesResults(options: {
+        customerId?: number;
+        startRangeBegin?: string;
+        finishRangeBegin?: string;
+        seriesId?: number;
+        officialOnly?: boolean;
+    }): Promise<any[] | null> {
+        try {
+            await this.ensureAuthenticated();
+            
+            const params: any = {};
+            if (options.customerId) params.cust_id = options.customerId;
+            if (options.startRangeBegin) params.start_range_begin = options.startRangeBegin;
+            if (options.finishRangeBegin) params.finish_range_begin = options.finishRangeBegin;
+            if (options.seriesId) params.series_id = options.seriesId;
+            if (options.officialOnly !== undefined) params.official_only = options.officialOnly;
+            
+            const response = await this.client.get('/data/results/search_series', { params });
+
+            let data = response.data;
+            
+            // Check if response contains a link to S3 data
+            if (data.link) {
+                console.log('Fetching search results from S3 link');
+                const s3Response = await this.client.get(data.link);
+                data = s3Response.data;
+            }
+            
+            // Handle chunk_info structure for series search results
+            if (data.data && data.data.chunk_info) {
+                const chunkInfo = data.data.chunk_info;
+                if (chunkInfo.chunk_file_names && chunkInfo.base_download_url) {
+                    console.log(`Processing ${chunkInfo.num_chunks} chunks with ${chunkInfo.rows} total results`);
+                    
+                    const allResults: any[] = [];
+                    const baseUrl = chunkInfo.base_download_url.replace(/\/$/, '');
+                    
+                    for (const chunkFile of chunkInfo.chunk_file_names) {
+                        try {
+                            const chunkUrl = `${baseUrl}/${chunkFile}`;
+                            const chunkResponse = await this.client.get(chunkUrl);
+                            if (Array.isArray(chunkResponse.data)) {
+                                allResults.push(...chunkResponse.data);
+                            }
+                        } catch (chunkError) {
+                            console.error('Error fetching chunk:', chunkError);
+                        }
+                    }
+                    
+                    return allResults;
+                }
+            }
+            
+            // Direct array response
+            if (Array.isArray(data)) {
+                return data;
+            }
+            
+            console.warn('Unexpected series search data format:', typeof data);
+            return null;
+        } catch (error: any) {
+            if (error.response?.status === 401) {
+                console.log('Authentication expired for series search, retrying with fresh login...');
+                try {
+                    await this.ensureAuthenticated(true);
+                    // Retry the same logic
+                    return await this.searchSeriesResults(options);
+                } catch (retryError) {
+                    console.error('Error searching series results after retry:', retryError);
+                    return null;
+                }
+            }
+            console.error('Error searching series results:', error);
+            return null;
+        }
+    }
+
+    async getSubsessionResult(subsessionId: number): Promise<any | null> {
+        try {
+            await this.ensureAuthenticated();
+            
+            const response = await this.client.get('/data/results/get', {
+                params: {
+                    subsession_id: subsessionId,
+                    include_licenses: true
+                }
+            });
+
+            // Check if response contains a link to S3 data
+            if (response.data.link) {
+                console.log('Fetching subsession result from S3 link');
+                const s3Response = await this.client.get(response.data.link);
+                return s3Response.data;
+            } else {
+                return response.data;
+            }
+        } catch (error) {
+            console.error(`Error fetching subsession result for ${subsessionId}:`, error);
             return null;
         }
     }
@@ -413,6 +565,61 @@ export class iRacingClient {
         if (!memberBests) return [];
         
         return memberBests.bests.filter(best => best.track.track_id === trackId);
+    }
+
+    // Fetch the world record best lap for a car+track.
+    // Returns the best time in ten-thousandths of a second, or undefined if none.
+    async getWorldRecordBestLap(carId: number, trackId: number, opts?: WorldRecordOptions): Promise<number | undefined> {
+        await this.ensureAuthenticated();
+        const includeQualify = opts?.includeQualify !== false; // default true
+        const includeRace = opts?.includeRace !== false;       // default true
+        const includeTT = opts?.includeTimeTrial !== false;     // default true
+        const includePractice = !!opts?.includePractice;        // default false
+
+        const key = `wr:${carId}:${trackId}:${opts?.seasonYear ?? 'all'}:${opts?.seasonQuarter ?? 'all'}:${includeQualify?1:0}${includeRace?1:0}${includeTT?1:0}${includePractice?1:0}`;
+        const now = Date.now();
+        const cached = this.worldRecordCache.get(key);
+        if (cached && cached.expiresAt > now) {
+            return cached.value;
+        }
+
+        const params: any = { car_id: carId, track_id: trackId };
+        if (typeof opts?.seasonYear === 'number') params.season_year = opts.seasonYear;
+        if (typeof opts?.seasonQuarter === 'number') params.season_quarter = opts.seasonQuarter;
+
+        const resp = await this.client.get('/data/stats/world_records', { params });
+        const data = resp.data?.data as WorldRecordsMeta | undefined;
+        const meta: WorldRecordsMeta | undefined = data && (data.success !== undefined ? data : resp.data as any);
+
+        let best: number | undefined;
+        const consider = (val?: number | null) => {
+            if (typeof val === 'number' && val > 0) {
+                if (best === undefined || val < best) best = val;
+            }
+        };
+
+        if (meta && meta.chunk_info && meta.chunk_info.base_download_url && Array.isArray(meta.chunk_info.chunk_file_names)) {
+            const base = meta.chunk_info.base_download_url.replace(/\/$/, '/')
+            for (const name of meta.chunk_info.chunk_file_names) {
+                try {
+                    const url = base + name;
+                    const chunkResp = await this.client.get(url);
+                    const rows: any[] = Array.isArray(chunkResp.data) ? chunkResp.data : [];
+                    for (const row of rows) {
+                        if (includePractice) consider(row.practice_lap_time);
+                        if (includeQualify) consider(row.qualify_lap_time);
+                        if (includeTT) consider(row.tt_lap_time);
+                        if (includeRace) consider(row.race_lap_time);
+                    }
+                } catch (e) {
+                    // Skip failed chunk
+                }
+            }
+        }
+
+        // Cache ~15 minutes
+        this.worldRecordCache.set(key, { value: best, expiresAt: now + 15 * 60 * 1000 });
+        return best;
     }
     
     async getSeriesSeasons(seriesId: number): Promise<any> {
@@ -512,6 +719,24 @@ export class iRacingClient {
         return this.fetchMaybeS3('/data/car/assets');
     }
 
+    async getCars(): Promise<any> {
+        return this.fetchMaybeS3('/data/car/get');
+    }
+
+    async getCarName(carId: number): Promise<string | null> {
+        try {
+            const cars = await this.getCars();
+            if (Array.isArray(cars)) {
+                const car = cars.find((c: any) => c && c.car_id === carId);
+                return car?.car_name || null;
+            }
+            return null;
+        } catch (error) {
+            console.warn(`Could not fetch car name for car ID ${carId}:`, error);
+            return null;
+        }
+    }
+
     async getTrackAssets(): Promise<any> {
         // If /data/track/assets is not available in some environments, callers should handle errors.
         return this.fetchMaybeS3('/data/track/assets');
@@ -592,6 +817,57 @@ export class iRacingClient {
             const file = activeName.endsWith('.svg') ? activeName : `${activeName}.svg`;
             return `${base}/${file}`;
         } catch {
+            return null;
+        }
+    }
+
+    async getTrackMapActivePng(trackId: number): Promise<string | null> {
+        try {
+            // Get the SVG URL first
+            const svgUrl = await this.getTrackMapActiveUrl(trackId);
+            if (!svgUrl) return null;
+
+            // Create cache filename based on SVG URL hash
+            const hash = createHash('sha256').update(svgUrl).digest('hex');
+            const cacheFilename = `${hash}.png`;
+            const cachePath = join(this.cacheDir, cacheFilename);
+
+            // Check if cached version exists
+            try {
+                await fs.access(cachePath);
+                // Return local file path for cached version
+                return cachePath;
+            } catch {
+                // Cache miss, need to create PNG
+            }
+
+            // Ensure cache directory exists
+            try {
+                await fs.mkdir(this.cacheDir, { recursive: true });
+            } catch (err) {
+                console.warn('Could not create cache directory:', err);
+            }
+
+            // Download SVG
+            const response = await axios.get(svgUrl, { responseType: 'arraybuffer' });
+            const svgBuffer = Buffer.from(response.data);
+
+            // Convert SVG to PNG using Sharp
+            const pngBuffer = await sharp(svgBuffer)
+                .png()
+                .resize(800, 600, { 
+                    fit: 'contain', 
+                    background: { r: 0, g: 0, b: 0, alpha: 0 } // Transparent background
+                })
+                .toBuffer();
+
+            // Save to cache
+            await fs.writeFile(cachePath, pngBuffer);
+
+            // Return local file path
+            return cachePath;
+        } catch (error) {
+            console.warn('Could not convert track map SVG to PNG:', error);
             return null;
         }
     }

@@ -38,17 +38,37 @@ export interface TrackCarCombo {
     last_updated: string;
 }
 
-export interface LapTimeRecord {
+export interface RaceResult {
     id?: number;
-    combo_id: number;
+    subsession_id: number;
     discord_id: string;
     iracing_customer_id: number;
     iracing_username: string;
-    lap_time_microseconds: number;
-    subsession_id: number;
+    series_id: number;
+    series_name: string;
+    track_id: number;
+    track_name: string;
+    config_name: string;
+    car_id: number;
+    car_name: string;
+    start_time: string;
+    finish_position: number;
+    starting_position?: number;
+    incidents: number;
+    irating_before?: number;
+    irating_after?: number;
+    license_level_before?: number;
+    license_level_after?: number;
     event_type: string;
-    recorded_at: string;
+    official_session: boolean;
+    created_at: string;
     last_updated: string;
+}
+
+export interface RaceLogChannel {
+    channel_id: string;
+    guild_id: string;
+    created_at: string;
 }
 
 export class Database {
@@ -117,20 +137,41 @@ export class Database {
         `);
         
         await run(`
-            CREATE TABLE IF NOT EXISTS lap_time_records (
+            CREATE TABLE IF NOT EXISTS race_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                combo_id INTEGER NOT NULL,
+                subsession_id INTEGER NOT NULL,
                 discord_id TEXT NOT NULL,
                 iracing_customer_id INTEGER NOT NULL,
                 iracing_username TEXT NOT NULL,
-                lap_time_microseconds INTEGER NOT NULL,
-                subsession_id INTEGER NOT NULL,
+                series_id INTEGER NOT NULL,
+                series_name TEXT NOT NULL,
+                track_id INTEGER NOT NULL,
+                track_name TEXT NOT NULL,
+                config_name TEXT NOT NULL,
+                car_id INTEGER NOT NULL,
+                car_name TEXT NOT NULL,
+                start_time DATETIME NOT NULL,
+                finish_position INTEGER NOT NULL,
+                starting_position INTEGER,
+                incidents INTEGER NOT NULL,
+                irating_before INTEGER,
+                irating_after INTEGER,
+                license_level_before INTEGER,
+                license_level_after INTEGER,
                 event_type TEXT NOT NULL,
-                recorded_at DATETIME NOT NULL,
+                official_session BOOLEAN NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(combo_id, discord_id),
-                FOREIGN KEY (combo_id) REFERENCES track_car_combos (id),
+                UNIQUE(subsession_id, discord_id),
                 FOREIGN KEY (discord_id) REFERENCES user_links (discord_id)
+            )
+        `);
+
+        await run(`
+            CREATE TABLE IF NOT EXISTS race_log_channels (
+                channel_id TEXT PRIMARY KEY,
+                guild_id TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         `);
     }
@@ -303,11 +344,12 @@ export class Database {
         });
     }
     
-    async upsertLapTimeRecord(record: LapTimeRecord): Promise<void> {
+    // Race Log Channel methods
+    async setRaceLogChannel(channelId: string, guildId: string): Promise<void> {
         return new Promise((resolve, reject) => {
             this.db.run(
-                'INSERT OR REPLACE INTO lap_time_records (combo_id, discord_id, iracing_customer_id, iracing_username, lap_time_microseconds, subsession_id, event_type, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                [record.combo_id, record.discord_id, record.iracing_customer_id, record.iracing_username, record.lap_time_microseconds, record.subsession_id, record.event_type, record.recorded_at],
+                'INSERT OR REPLACE INTO race_log_channels (channel_id, guild_id) VALUES (?, ?)',
+                [channelId, guildId],
                 (err) => {
                     if (err) reject(err);
                     else resolve();
@@ -315,15 +357,99 @@ export class Database {
             );
         });
     }
-    
-    async getTopLapTimesForCombo(comboId: number, limit: number = 10): Promise<LapTimeRecord[]> {
+
+    async getRaceLogChannel(channelId: string): Promise<RaceLogChannel | null> {
+        return new Promise((resolve, reject) => {
+            this.db.get(
+                'SELECT channel_id, guild_id, created_at FROM race_log_channels WHERE channel_id = ?',
+                [channelId],
+                (err, row: RaceLogChannel | undefined) => {
+                    if (err) reject(err);
+                    else resolve(row || null);
+                }
+            );
+        });
+    }
+
+    async getAllRaceLogChannels(): Promise<RaceLogChannel[]> {
+        const all = promisify(this.db.all.bind(this.db));
+        const results = await all(
+            'SELECT channel_id, guild_id, created_at FROM race_log_channels ORDER BY created_at DESC'
+        ) as RaceLogChannel[];
+        
+        return results;
+    }
+
+    async removeRaceLogChannel(channelId: string): Promise<boolean> {
+        return new Promise((resolve, reject) => {
+            this.db.run('DELETE FROM race_log_channels WHERE channel_id = ?', [channelId], function(err) {
+                if (err) reject(err);
+                else resolve(this.changes > 0);
+            });
+        });
+    }
+
+    // Race Result methods
+    async upsertRaceResult(result: RaceResult): Promise<void> {
+        return new Promise((resolve, reject) => {
+            this.db.run(
+                `INSERT OR REPLACE INTO race_results (
+                    subsession_id, discord_id, iracing_customer_id, iracing_username,
+                    series_id, series_name, track_id, track_name, config_name,
+                    car_id, car_name, start_time, finish_position, starting_position,
+                    incidents, irating_before, irating_after, license_level_before,
+                    license_level_after, event_type, official_session
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [
+                    result.subsession_id, result.discord_id, result.iracing_customer_id, result.iracing_username,
+                    result.series_id, result.series_name, result.track_id, result.track_name, result.config_name,
+                    result.car_id, result.car_name, result.start_time, result.finish_position, result.starting_position,
+                    result.incidents, result.irating_before, result.irating_after, result.license_level_before,
+                    result.license_level_after, result.event_type, result.official_session ? 1 : 0
+                ],
+                (err) => {
+                    if (err) reject(err);
+                    else resolve();
+                }
+            );
+        });
+    }
+
+    async getRecentRaceResults(discordId: string, limit: number = 10): Promise<RaceResult[]> {
         return new Promise((resolve, reject) => {
             this.db.all(
-                'SELECT id, combo_id, discord_id, iracing_customer_id, iracing_username, lap_time_microseconds, subsession_id, event_type, recorded_at, last_updated FROM lap_time_records WHERE combo_id = ? ORDER BY lap_time_microseconds ASC LIMIT ?',
-                [comboId, limit],
-                (err, rows: LapTimeRecord[]) => {
+                `SELECT * FROM race_results WHERE discord_id = ? 
+                 ORDER BY start_time DESC LIMIT ?`,
+                [discordId, limit],
+                (err, rows: RaceResult[]) => {
                     if (err) reject(err);
                     else resolve(rows || []);
+                }
+            );
+        });
+    }
+
+    async getRaceResultExists(subsessionId: number, discordId: string): Promise<boolean> {
+        return new Promise((resolve, reject) => {
+            this.db.get(
+                'SELECT 1 FROM race_results WHERE subsession_id = ? AND discord_id = ?',
+                [subsessionId, discordId],
+                (err, row) => {
+                    if (err) reject(err);
+                    else resolve(!!row);
+                }
+            );
+        });
+    }
+
+    async getLatestRaceResultTime(discordId: string): Promise<string | null> {
+        return new Promise((resolve, reject) => {
+            this.db.get(
+                'SELECT start_time FROM race_results WHERE discord_id = ? ORDER BY start_time DESC LIMIT 1',
+                [discordId],
+                (err, row: { start_time: string } | undefined) => {
+                    if (err) reject(err);
+                    else resolve(row?.start_time || null);
                 }
             );
         });
