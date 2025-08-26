@@ -338,6 +338,27 @@ class Database {
             });
         });
     }
+    async getRaceResultsForUserAsc(discordId, opts) {
+        const params = [discordId];
+        const where = ['discord_id = ?'];
+        if (opts?.trackId) {
+            where.push('track_id = ?');
+            params.push(opts.trackId);
+        }
+        if (opts?.carId) {
+            where.push('car_id = ?');
+            params.push(opts.carId);
+        }
+        const sql = `SELECT * FROM race_results WHERE ${where.join(' AND ')} ORDER BY datetime(start_time) ASC, id ASC`;
+        return new Promise((resolve, reject) => {
+            this.db.all(sql, params, (err, rows) => {
+                if (err)
+                    reject(err);
+                else
+                    resolve(rows || []);
+            });
+        });
+    }
     async getRaceResultExists(subsessionId, discordId) {
         return new Promise((resolve, reject) => {
             this.db.get('SELECT 1 FROM race_results WHERE subsession_id = ? AND discord_id = ?', [subsessionId, discordId], (err, row) => {

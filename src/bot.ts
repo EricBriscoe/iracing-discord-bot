@@ -1,4 +1,5 @@
-import { Client, GatewayIntentBits, SlashCommandBuilder, ChatInputCommandInteraction, MessageFlags, PermissionFlagsBits, TextChannel, EmbedBuilder, AttachmentBuilder, Message, Collection } from 'discord.js';
+import { Client, GatewayIntentBits, SlashCommandBuilder, ChatInputCommandInteraction, MessageFlags, PermissionFlagsBits, TextChannel, EmbedBuilder, AttachmentBuilder, Message, Collection, ButtonBuilder, ButtonStyle, ActionRowBuilder, ButtonInteraction } from 'discord.js';
+import sharp from 'sharp';
 import { config } from 'dotenv';
 import { Database, OfficialSeries, RaceResult, RaceLogChannel } from './database';
 import { iRacingClient, Series } from './iracing-client';
@@ -46,6 +47,9 @@ class iRacingBot {
                         case 'race-log':
                             await this.handleRaceLogCommand(interaction);
                             break;
+                        case 'history':
+                            await this.handleHistoryCommand(interaction);
+                            break;
                     }
                 } catch (error) {
                     console.error('Error handling interaction:', error);
@@ -54,6 +58,12 @@ class iRacingBot {
                     } catch (replyError) {
                         console.error('Failed to send error message:', replyError);
                     }
+                }
+            } else if (interaction.isButton()) {
+                try {
+                    await this.handleHistoryButton(interaction);
+                } catch (error) {
+                    console.error('Error handling button interaction:', error);
                 }
             }
         });
@@ -85,6 +95,10 @@ class iRacingBot {
             new SlashCommandBuilder()
                 .setName('race-log')
                 .setDescription('Set this channel to receive race result notifications for tracked members')
+            ,
+            new SlashCommandBuilder()
+                .setName('history')
+                .setDescription('Show your % over WR history for all cars on a track, with range & track navigation')
         ];
 
         try {
@@ -631,6 +645,335 @@ class iRacingBot {
             console.warn('Could not fetch lap time data:', error);
             return [];
         }
+    }
+
+    // ===== History command support =====
+    private async handleHistoryCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+        try {
+            const linked = await this.db.getLinkedUser(interaction.user.id);
+            if (!linked || !linked.iracing_customer_id) {
+                await interaction.reply({ content: '❌ You need to link your iRacing account first using /link.', flags: [MessageFlags.Ephemeral] });
+                return;
+            }
+
+            await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+
+            const range = '90d';
+            const { imageBuffer, embed } = await this.buildHistoryResponse(interaction.user.id, linked.iracing_customer_id!, range);
+            const attachment = new AttachmentBuilder(imageBuffer, { name: 'history.png' });
+            const rows = this.buildHistoryButtons(interaction.user.id, range);
+            await interaction.editReply({ embeds: [embed], files: [attachment], components: rows });
+        } catch (error) {
+            console.error('Error handling /history:', error);
+            try { await interaction.editReply({ content: '❌ Failed to build history chart.' }); } catch {}
+        }
+    }
+
+    private buildHistoryButtons(userId: string, active: string) {
+        const ranges = [
+            { k: '30d', label: '30d' },
+            { k: '90d', label: '90d' },
+            { k: '6m', label: '6m' },
+            { k: '1y', label: '1y' },
+            { k: 'all', label: 'All' }
+        ];
+        const buttons = ranges.map(r => new ButtonBuilder()
+            .setCustomId(`history|${userId}|${r.k}`)
+            .setLabel(r.label)
+            .setStyle(r.k === active ? ButtonStyle.Primary : ButtonStyle.Secondary));
+        const row = new ActionRowBuilder<ButtonBuilder>().addComponents(...buttons);
+        return [row];
+    }
+
+    private async handleHistoryButton(interaction: ButtonInteraction): Promise<void> {
+        const customId = interaction.customId;
+        if (!customId.startsWith('history|')) return;
+        const parts = customId.split('|');
+        if (parts.length !== 3) return;
+        const uid = parts[1]!;
+        const range = parts[2]!;
+        if (interaction.user.id !== uid) {
+            await interaction.reply({ content: '❌ Only the original requester can use these buttons.', ephemeral: true });
+            return;
+        }
+        const linked = await this.db.getLinkedUser(uid);
+        if (!linked || !linked.iracing_customer_id) {
+            await interaction.reply({ content: '❌ Your account is no longer linked.', ephemeral: true });
+            return;
+        }
+        // Acknowledge quickly to avoid interaction expiry, then edit original message after heavy work
+        try { await interaction.deferUpdate(); } catch {}
+        const { imageBuffer, embed } = await this.buildHistoryResponse(uid, linked.iracing_customer_id!, range);
+        const attachment = new AttachmentBuilder(imageBuffer, { name: 'history.png' });
+        const rows = this.buildHistoryButtons(uid, range);
+        await interaction.editReply({ embeds: [embed], files: [attachment], components: rows });
+    }
+
+    private async pickTrackAndCarForUser(discordId: string, trackQuery: string, inputCarId?: number): Promise<{ trackId: number; carId: number; trackName: string; carName: string } | null> {
+        const all = await this.db.getRaceResultsForUserAsc(discordId);
+        if (all.length === 0) return null;
+        let candidates = all;
+        if (trackQuery) {
+            const q = trackQuery.toLowerCase();
+            const filtered = all.filter(r => (r.track_name && r.track_name.toLowerCase().includes(q)) || (r.config_name && r.config_name.toLowerCase().includes(q)));
+            if (filtered.length > 0) candidates = filtered;
+        }
+        if (candidates.length === 0) return null;
+        const latest = candidates[candidates.length - 1]!;
+        const trackId = latest.track_id;
+        let carId = inputCarId || latest.car_id;
+        if (!carId) {
+            const onTrack = all.filter(r => r.track_id === trackId);
+            if (onTrack.length > 0) {
+                const last = onTrack[onTrack.length - 1];
+                if (last) carId = last.car_id;
+            }
+        }
+        const carName = latest.car_name || 'Car';
+        const cfg = (latest as any).config_name || '';
+        const trackName = cfg ? `${latest.track_name} (${cfg})` : latest.track_name;
+        return { trackId, carId, trackName, carName };
+    }
+
+    private async buildHistoryResponse(discordId: string, customerId: number, range: string): Promise<{ imageBuffer: Buffer; embed: EmbedBuilder }> {
+        const { points, combos } = await this.collectHistoryPoints(discordId, customerId, range);
+        const svg = this.renderHistorySvg(points, { title: `All Tracks • All Cars`, range });
+        const imageBuffer = await sharp(Buffer.from(svg)).png().toBuffer();
+
+        const embed = new EmbedBuilder()
+            .setTitle('Lap vs World Record')
+            .setDescription(`All tracks and cars`)
+            .addFields(
+                { name: 'Points', value: String(points.length), inline: true },
+                { name: 'Range', value: range.toUpperCase(), inline: true },
+                { name: 'Combos', value: String(combos), inline: true }
+            )
+            .setImage('attachment://history.png')
+            .setColor(0x3b82f6);
+
+        return { imageBuffer, embed };
+    }
+
+    private async collectHistoryPoints(discordId: string, customerId: number, range: string): Promise<{ points: Array<{ t: number; y: number }>; combos: number }> {
+        const all = await this.db.getRaceResultsForUserAsc(discordId);
+        const cutoff = this.rangeToCutoff(range);
+        const filtered = cutoff ? all.filter(r => new Date(r.start_time).getTime() >= cutoff) : all;
+        // Build unique car/track combos and prefetch WRs
+        const comboKeys = new Set<string>();
+        for (const r of filtered) comboKeys.add(`${r.car_id}:${r.track_id}`);
+        const wrCache = new Map<string, number | undefined>();
+        const combos = Array.from(comboKeys);
+        const limit = 6;
+        for (let i = 0; i < combos.length; i += limit) {
+            const batch = combos.slice(i, i + limit).map(async (key) => {
+                const parts = key.split(':');
+                const carStr = parts[0] || '0';
+                const trackStr = parts[1] || '0';
+                const wr = await this.iracing.getWorldRecordBestLap(parseInt(carStr, 10), parseInt(trackStr, 10));
+                wrCache.set(key, wr ?? undefined);
+            });
+            await Promise.all(batch);
+        }
+        // Collect points with basic caching of per-subsesson best lap
+        const bestLapCache = new Map<number, number | null>();
+        const points: Array<{ t: number; y: number }> = [];
+        for (const r of filtered) {
+            let best = bestLapCache.get(r.subsession_id) ?? null;
+            if (best === null && !bestLapCache.has(r.subsession_id)) {
+                best = await this.getUserBestRaceLap(r.subsession_id, customerId);
+                bestLapCache.set(r.subsession_id, best);
+            }
+            const wr = wrCache.get(`${r.car_id}:${r.track_id}`);
+            if (!best || !wr || wr <= 0) continue;
+            const pct = ((best - wr) / wr) * 100;
+            const t = new Date(r.start_time).getTime();
+            points.push({ t, y: pct });
+        }
+        return { points, combos: comboKeys.size };
+    }
+
+    private rangeToCutoff(range: string): number | null {
+        const now = Date.now();
+        const day = 24 * 60 * 60 * 1000;
+        switch (range) {
+            case '30d': return now - 30 * day;
+            case '90d': return now - 90 * day;
+            case '6m': return now - 182 * day;
+            case '1y': return now - 365 * day;
+            case 'all': return null;
+            default: return now - 90 * day;
+        }
+    }
+
+    private async getUserBestRaceLap(subsessionId: number, customerId: number): Promise<number | null> {
+        const ss = await this.iracing.getSubsessionResult(subsessionId);
+        if (!ss || !Array.isArray(ss.session_results)) return null;
+        const getType = (sr: any) => (sr?.simsession_type_name || sr?.simsession_name || sr?.session_type || '').toString();
+        const raceSession = ss.session_results.find((sr: any) => /race/i.test(getType(sr)) && !/qual/i.test(getType(sr)));
+        const row = raceSession?.results?.find((x: any) => x.cust_id === customerId);
+        const best = row?.best_lap_time;
+        return typeof best === 'number' && best > 0 ? best : null;
+    }
+
+    private renderHistorySvg(points: Array<{ t: number; y: number }>, opts: { title: string; range: string }): string {
+        const width = 1200, height = 600, margin = 60;
+        const innerW = width - margin * 2, innerH = height - margin * 2;
+        const times = points.map(p => p.t);
+        const ys = points.map(p => p.y);
+        const minX = times.length ? Math.min(...times) : Date.now() - 1;
+        const maxX = times.length ? Math.max(...times) : Date.now();
+        const minY = ys.length ? Math.min(...ys) : 0;
+        const maxY = ys.length ? Math.max(...ys) : 1;
+        const padY = (maxY - minY) * 0.1 || 1;
+        const y0 = minY - padY;
+        const y1 = maxY + padY;
+        const xScale = (x: number) => margin + (times.length <= 1 ? innerW/2 : ((x - minX) / (maxX - minX)) * innerW);
+        const yScale = (y: number) => margin + innerH - ((y - y0) / (y1 - y0)) * innerH;
+
+        const path = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${xScale(p.t).toFixed(1)} ${yScale(p.y).toFixed(1)}`).join(' ');
+
+        const loess = this.loessSmooth(points, { resolution: Math.min(300, Math.max(120, points.length * 8)), robust: true });
+
+        const yTicks = 5;
+        const ticks: number[] = [];
+        for (let i = 0; i <= yTicks; i++) ticks.push(y0 + (i * (y1 - y0) / yTicks));
+
+        const fmtPct = (v: number) => `${v.toFixed(1)}%`;
+        const pointsCircles = points.map(p => `<circle cx="${xScale(p.t).toFixed(1)}" cy="${yScale(p.y).toFixed(1)}" r="3" fill="#93c5fd" stroke="#1d4ed8" stroke-width="1" />`).join('\n');
+
+        return `<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<svg width=\"${width}\" height=\"${height}\" viewBox=\"0 0 ${width} ${height}\" xmlns=\"http://www.w3.org/2000/svg\">
+  <rect x=\"0\" y=\"0\" width=\"${width}\" height=\"${height}\" fill=\"#0b1220\" />
+  <text x=\"${width/2}\" y=\"30\" fill=\"#e5e7eb\" font-family=\"DejaVu Sans, Liberation Sans, Arial, sans-serif\" font-size=\"20\" text-anchor=\"middle\">${opts.title} • ${opts.range.toUpperCase()}</text>
+  <line x1=\"${margin}\" y1=\"${margin}\" x2=\"${margin}\" y2=\"${height - margin}\" stroke=\"#334155\" stroke-width=\"1\" />
+  <line x1=\"${margin}\" y1=\"${height - margin}\" x2=\"${width - margin}\" y2=\"${height - margin}\" stroke=\"#334155\" stroke-width=\"1\" />
+  ${ticks.map(t => `<g>
+    <line x1=\"${margin}\" y1=\"${yScale(t).toFixed(1)}\" x2=\"${width - margin}\" y2=\"${yScale(t).toFixed(1)}\" stroke=\"#1f2937\" stroke-width=\"1\" opacity=\"0.4\" />
+    <text x=\"${margin - 10}\" y=\"${yScale(t).toFixed(1)}\" fill=\"#9ca3af\" font-size=\"12\" text-anchor=\"end\" dominant-baseline=\"middle\">${fmtPct(t)}</text>
+  </g>`).join('')}
+  ${pointsCircles}
+  ${loess.length > 1 ? `<path d=\"${loess.map((p,i)=>`${i===0?'M':'L'} ${xScale(p.t).toFixed(1)} ${yScale(p.y).toFixed(1)}`).join(' ')}\" fill=\"none\" stroke=\"#22c55e\" stroke-dasharray=\"6 6\" stroke-width=\"2\" />` : ''}
+  <g transform=\"translate(${width - margin - 200}, ${margin})\">
+    <rect x=\"0\" y=\"0\" width=\"200\" height=\"60\" fill=\"#0f172a\" stroke=\"#334155\" />
+    <circle cx=\"12\" cy=\"14\" r=\"4\" fill=\"#2563eb\" /><text x=\"24\" y=\"18\" fill=\"#e5e7eb\" font-size=\"12\">Point (% over WR)</text>
+    <line x1=\"8\" y1=\"32\" x2=\"20\" y2=\"32\" stroke=\"#22c55e\" stroke-dasharray=\"6 6\" stroke-width=\"2\" />
+    <text x=\"24\" y=\"36\" fill=\"#e5e7eb\" font-size=\"12\">Trend</text>
+  </g>
+</svg>`;
+    }
+
+    private linearRegression(points: Array<{ t: number; y: number }>): { m: number; b: number } | null {
+        if (points.length < 2) return null;
+        const xs = points.map(p => p.t);
+        const ys = points.map(p => p.y);
+        const x0 = Math.min(...xs);
+        const nx = xs.map(x => (x - x0) / (24 * 60 * 60 * 1000));
+        const n = nx.length;
+        const sumX = nx.reduce((a, b) => a + b, 0);
+        const sumY = ys.reduce((a, b) => a + b, 0);
+        let sumXY = 0;
+        for (let i = 0; i < n; i++) {
+            const yi = ys[i];
+            if (typeof yi !== 'number') continue;
+            const xi = nx[i] ?? 0;
+            sumXY += xi * yi;
+        }
+        const sumXX = nx.reduce((a, x) => a + x * x, 0);
+        const denom = n * sumXX - sumX * sumX;
+        if (denom === 0) return null;
+        const mDay = (n * sumXY - sumX * sumY) / denom;
+        const b = (sumY - mDay * sumX) / n;
+        const m = mDay / (24 * 60 * 60 * 1000);
+        return { m, b: b - m * x0 };
+    }
+
+    private loessSmooth(points: Array<{ t: number; y: number }>, opts?: { span?: number; resolution?: number; robust?: boolean }): Array<{ t: number; y: number }> {
+        const pts = points.slice().sort((a, b) => a.t - b.t);
+        const n = pts.length;
+        if (n === 0) return [];
+        if (n === 1) return [pts[0]!];
+        // Adaptive span: for small datasets, increase span for a looser, smoother fit
+        const autoSpan = n <= 20 ? 0.85 : n <= 50 ? 0.65 : 0.45;
+        const span = Math.min(0.95, Math.max(0.2, opts?.span ?? autoSpan));
+        const k = Math.max(2, Math.ceil(span * n));
+        const xs = pts.map(p => p.t);
+        const ys = pts.map(p => p.y);
+        const minX = xs[0]!;
+        const maxX = xs[n - 1]!;
+        // Higher resolution for smoother visual line regardless of point count
+        const resolution = Math.max(100, Math.min(360, opts?.resolution ?? 240));
+        const evalXs: number[] = [];
+        if (resolution >= n) {
+            for (const x of xs) evalXs.push(x);
+        } else {
+            const step = (maxX - minX) / (resolution - 1 || 1);
+            for (let i = 0; i < resolution; i++) evalXs.push(minX + i * step);
+        }
+        // Local weighted regression
+        const yhatAt = (x0: number, robustW?: number[]): number => {
+            const distances = xs.map((x, idx) => ({ idx, d: Math.abs((x as number) - x0) }));
+            distances.sort((a, b) => a.d - b.d);
+            const window = distances.slice(0, k);
+            const last = window[window.length - 1];
+            const dmax = (last ? last.d : 0) || 1e-9;
+            let Sw = 0, Sx = 0, Sy = 0, Sxx = 0, Sxy = 0;
+            for (const { idx, d } of window) {
+                const u = d / dmax;
+                let w = (1 - Math.pow(u, 3)) ** 3; // tricube weight
+                if (robustW && typeof robustW[idx] === 'number') w *= robustW[idx]!;
+                const x = xs[idx]!;
+                const y = ys[idx]!;
+                Sw += w;
+                Sx += w * x;
+                Sy += w * y;
+                Sxx += w * x * x;
+                Sxy += w * x * y;
+            }
+            const denom = Sw * Sxx - Sx * Sx;
+            if (Math.abs(denom) < 1e-12 || Sw === 0) return Sy / (Sw || 1);
+            const a = (Sxx * Sy - Sx * Sxy) / denom;
+            const b = (Sw * Sxy - Sx * Sy) / denom;
+            return a + b * x0;
+        };
+        // Initial fit at data x's
+        const initialFits: number[] = xs.map(x0 => yhatAt(x0!));
+        // Up to two robust iterations to downweight outliers strongly
+        let robustW: number[] | undefined = undefined;
+        if (opts?.robust !== false) {
+            const computeRobustWeights = (fits: number[]): number[] => {
+                const residuals = ys.map((y, i) => (y as number) - fits[i]!);
+                const absRes = residuals.map(r => Math.abs(r)).sort((a, b) => a - b);
+                const median = absRes.length > 0
+                    ? (absRes.length % 2 === 1
+                        ? absRes[(absRes.length - 1) >> 1]!
+                        : ((absRes[absRes.length / 2 - 1]! + absRes[absRes.length / 2]!) / 2))
+                    : 0;
+                const s = median > 0 ? 4.685 * median : 1e-6; // stronger downweight
+                return residuals.map(r => {
+                    const u = Math.abs(r) / s;
+                    if (u >= 1) return 0;
+                    return (1 - u * u) ** 2; // Tukey bisquare
+                });
+            };
+            robustW = computeRobustWeights(initialFits);
+            // second pass fits
+            const secondFits = xs.map(x0 => yhatAt(x0!, robustW));
+            robustW = computeRobustWeights(secondFits);
+        }
+        // Evaluate and then apply a light moving-average on outputs to ensure smoothness
+        const out: Array<{ t: number; y: number }> = [];
+        for (const x0 of evalXs) out.push({ t: x0, y: yhatAt(x0, robustW) });
+        const smoothed: Array<{ t: number; y: number }> = [];
+        const win = Math.max(3, Math.floor(Math.min(13, Math.round(resolution / 30)))); // small window
+        const half = Math.floor(win / 2);
+        for (let i = 0; i < out.length; i++) {
+            let sum = 0, cnt = 0;
+            for (let j = i - half; j <= i + half; j++) {
+                if (j >= 0 && j < out.length) { sum += out[j]!.y; cnt++; }
+            }
+            smoothed.push({ t: out[i]!.t, y: cnt > 0 ? sum / cnt : out[i]!.y });
+        }
+        return smoothed;
     }
 
     private getPositionColor(position: number): number {

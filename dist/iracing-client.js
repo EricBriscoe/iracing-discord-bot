@@ -15,6 +15,7 @@ class iRacingClient {
         this.loginPromise = null;
         this.staticImagesBase = 'https://images-static.iracing.com/';
         this.worldRecordCache = new Map();
+        this.subsessionCache = new Map();
         this.cacheDir = './data/cache/images';
         this.username = process.env.IRACING_USERNAME || '';
         if (process.env.IRACING_HASHWORD) {
@@ -274,7 +275,13 @@ class iRacingClient {
             return null;
         }
     }
-    async getSubsessionResult(subsessionId) {
+    async getSubsessionResult(subsessionId, opts) {
+        const ttl = typeof opts?.ttlMs === 'number' ? opts.ttlMs : 24 * 60 * 60 * 1000;
+        const cached = this.subsessionCache.get(subsessionId);
+        const now = Date.now();
+        if (!opts?.forceRefresh && cached && cached.expiresAt > now) {
+            return cached.data;
+        }
         try {
             await this.ensureAuthenticated();
             const response = await this.client.get('/data/results/get', {
@@ -283,16 +290,26 @@ class iRacingClient {
                     include_licenses: true
                 }
             });
-            if (response.data.link) {
+            let data = response.data;
+            if (data && data.link) {
                 console.log('Fetching subsession result from S3 link');
-                const s3Response = await this.client.get(response.data.link);
-                return s3Response.data;
+                const s3Response = await this.client.get(data.link);
+                data = s3Response.data;
             }
-            else {
-                return response.data;
-            }
+            this.subsessionCache.set(subsessionId, { data, expiresAt: now + ttl });
+            return data;
         }
         catch (error) {
+            if (error?.response?.status === 401) {
+                try {
+                    await this.ensureAuthenticated(true);
+                    return await this.getSubsessionResult(subsessionId, opts);
+                }
+                catch (retryErr) {
+                    console.error(`Error fetching subsession result for ${subsessionId} after retry:`, retryErr);
+                    return null;
+                }
+            }
             console.error(`Error fetching subsession result for ${subsessionId}:`, error);
             return null;
         }

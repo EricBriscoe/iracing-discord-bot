@@ -156,6 +156,7 @@ export class iRacingClient {
     private loginPromise: Promise<void> | null = null;
     private staticImagesBase = 'https://images-static.iracing.com/';
     private worldRecordCache = new Map<string, { value: number | undefined; expiresAt: number }>();
+    private subsessionCache = new Map<number, { data: any; expiresAt: number }>();
     private readonly cacheDir = './data/cache/images';
 
     constructor() {
@@ -462,10 +463,16 @@ export class iRacingClient {
         }
     }
 
-    async getSubsessionResult(subsessionId: number): Promise<any | null> {
+    async getSubsessionResult(subsessionId: number, opts?: { forceRefresh?: boolean; ttlMs?: number }): Promise<any | null> {
+        const ttl = typeof opts?.ttlMs === 'number' ? opts!.ttlMs! : 24 * 60 * 60 * 1000; // default 24h
+        const cached = this.subsessionCache.get(subsessionId);
+        const now = Date.now();
+        if (!opts?.forceRefresh && cached && cached.expiresAt > now) {
+            return cached.data;
+        }
         try {
             await this.ensureAuthenticated();
-            
+
             const response = await this.client.get('/data/results/get', {
                 params: {
                     subsession_id: subsessionId,
@@ -473,15 +480,25 @@ export class iRacingClient {
                 }
             });
 
-            // Check if response contains a link to S3 data
-            if (response.data.link) {
+            let data = response.data;
+            if (data && data.link) {
                 console.log('Fetching subsession result from S3 link');
-                const s3Response = await this.client.get(response.data.link);
-                return s3Response.data;
-            } else {
-                return response.data;
+                const s3Response = await this.client.get(data.link);
+                data = s3Response.data;
             }
-        } catch (error) {
+
+            this.subsessionCache.set(subsessionId, { data, expiresAt: now + ttl });
+            return data;
+        } catch (error: any) {
+            if (error?.response?.status === 401) {
+                try {
+                    await this.ensureAuthenticated(true);
+                    return await this.getSubsessionResult(subsessionId, opts);
+                } catch (retryErr) {
+                    console.error(`Error fetching subsession result for ${subsessionId} after retry:`, retryErr);
+                    return null;
+                }
+            }
             console.error(`Error fetching subsession result for ${subsessionId}:`, error);
             return null;
         }

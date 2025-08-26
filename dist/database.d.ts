@@ -85,6 +85,10 @@ export declare class Database {
     upsertRaceResult(result: RaceResult): Promise<void>;
     getRecentRaceResults(discordId: string, limit?: number): Promise<RaceResult[]>;
     getAllRaceResultsAsc(): Promise<RaceResult[]>;
+    getRaceResultsForUserAsc(discordId: string, opts?: {
+        trackId?: number;
+        carId?: number;
+    }): Promise<RaceResult[]>;
     getRaceResultExists(subsessionId: number, discordId: string): Promise<boolean>;
     getLatestRaceResultTime(discordId: string): Promise<string | null>;
     close(): void;

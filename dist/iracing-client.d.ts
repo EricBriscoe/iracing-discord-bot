@@ -119,6 +119,7 @@ export declare class iRacingClient {
     private loginPromise;
     private staticImagesBase;
     private worldRecordCache;
+    private subsessionCache;
     private readonly cacheDir;
     constructor();
     private login;
@@ -135,7 +136,10 @@ export declare class iRacingClient {
         seriesId?: number;
         officialOnly?: boolean;
     }): Promise<any[] | null>;
-    getSubsessionResult(subsessionId: number): Promise<any | null>;
+    getSubsessionResult(subsessionId: number, opts?: {
+        forceRefresh?: boolean;
+        ttlMs?: number;
+    }): Promise<any | null>;
     getSeries(): Promise<Series[] | null>;
     getOfficialSeries(): Promise<Series[] | null>;
     getMemberBestLapTimes(customerId: number, carId?: number): Promise<MemberBests | null>;

@@ -442,6 +442,20 @@ export class Database {
         });
     }
 
+    async getRaceResultsForUserAsc(discordId: string, opts?: { trackId?: number; carId?: number }): Promise<RaceResult[]> {
+        const params: any[] = [discordId];
+        const where: string[] = ['discord_id = ?'];
+        if (opts?.trackId) { where.push('track_id = ?'); params.push(opts.trackId); }
+        if (opts?.carId) { where.push('car_id = ?'); params.push(opts.carId); }
+        const sql = `SELECT * FROM race_results WHERE ${where.join(' AND ')} ORDER BY datetime(start_time) ASC, id ASC`;
+        return new Promise((resolve, reject) => {
+            this.db.all(sql, params, (err, rows: RaceResult[]) => {
+                if (err) reject(err);
+                else resolve(rows || []);
+            });
+        });
+    }
+
     async getRaceResultExists(subsessionId: number, discordId: string): Promise<boolean> {
         return new Promise((resolve, reject) => {
             this.db.get(

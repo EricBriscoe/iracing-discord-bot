@@ -27,6 +27,9 @@ COPY package*.json ./
 # Install only production dependencies
 RUN npm install --omit=dev
 
+# Install fonts so SVG text renders correctly with sharp/libvips
+RUN apk add --no-cache fontconfig ttf-dejavu ttf-liberation
+
 # Copy built application from builder stage
 COPY --from=builder /app/dist ./dist
 
