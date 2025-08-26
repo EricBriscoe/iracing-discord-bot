@@ -171,20 +171,17 @@ class iRacingClient {
         }
     }
     async getMemberRecentRaces(customerId) {
-        try {
-            await this.ensureAuthenticated();
+        const fetchOnce = async () => {
             const response = await this.client.get('/data/stats/member_recent_races', {
-                params: {
-                    cust_id: customerId
-                }
+                params: { cust_id: customerId }
             });
             let data = response.data;
-            if (data.link) {
+            if (data && data.link) {
                 console.log('Fetching recent races from S3 link');
                 const s3Response = await this.client.get(data.link);
                 data = s3Response.data;
             }
-            if (data.races && Array.isArray(data.races)) {
+            if (data && Array.isArray(data.races)) {
                 return data.races;
             }
             else if (Array.isArray(data)) {
@@ -192,8 +189,23 @@ class iRacingClient {
             }
             console.warn('Unexpected recent races data format:', typeof data);
             return null;
+        };
+        try {
+            await this.ensureAuthenticated();
+            return await fetchOnce();
         }
         catch (error) {
+            if (error?.response?.status === 401) {
+                console.log('Authentication expired for recent races, retrying with fresh login...');
+                try {
+                    await this.ensureAuthenticated(true);
+                    return await fetchOnce();
+                }
+                catch (retryError) {
+                    console.error(`Error fetching recent races for ${customerId} after retry:`, retryError);
+                    return null;
+                }
+            }
             console.error(`Error fetching recent races for ${customerId}:`, error);
             return null;
         }

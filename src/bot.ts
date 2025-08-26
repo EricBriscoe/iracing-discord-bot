@@ -479,25 +479,26 @@ class iRacingBot {
         try {
             // Get detailed subsession result for lap times
             const subsessionDetail = await this.iracing.getSubsessionResult(subsessionId);
-            if (!subsessionDetail) return [];
+            if (!subsessionDetail || !Array.isArray(subsessionDetail.session_results)) return [];
 
-            const fields = [];
+            const fields: Array<{name: string, value: string, inline: boolean}> = [];
 
-            // Find the user's result for lap times
-            const userResult = subsessionDetail.session_results?.[0]?.results?.find((r: any) => r.cust_id === customerId);
-            
-            if (userResult) {
-                // Add best qualifying lap if available
-                if (userResult.best_qual_lap_time && userResult.best_qual_lap_time > 0) {
-                    const qualTime = this.iracing.formatLapTime(userResult.best_qual_lap_time);
-                    fields.push({ name: '🏃 Best Qualifying Lap', value: qualTime, inline: true });
-                }
+            const getType = (sr: any) => (sr?.simsession_type_name || sr?.simsession_name || sr?.session_type || '').toString();
 
-                // Add best race lap if available  
-                if (userResult.best_lap_time && userResult.best_lap_time > 0) {
-                    const raceTime = this.iracing.formatLapTime(userResult.best_lap_time);
-                    fields.push({ name: '⚡ Best Race Lap', value: raceTime, inline: true });
-                }
+            // Prefer the Race session for best race lap
+            const raceSession = subsessionDetail.session_results.find((sr: any) => /race/i.test(getType(sr)) && !/qual/i.test(getType(sr)));
+            const raceUser = raceSession?.results?.find((r: any) => r.cust_id === customerId);
+            if (raceUser && raceUser.best_lap_time && raceUser.best_lap_time > 0) {
+                const raceTime = this.iracing.formatLapTime(raceUser.best_lap_time);
+                fields.push({ name: '⚡ Best Race Lap', value: raceTime, inline: true });
+            }
+
+            // Prefer the Qualifying session for best qualifying lap
+            const qualSession = subsessionDetail.session_results.find((sr: any) => /qual/i.test(getType(sr)));
+            const qualUser = qualSession?.results?.find((r: any) => r.cust_id === customerId);
+            if (qualUser && qualUser.best_qual_lap_time && qualUser.best_qual_lap_time > 0) {
+                const qualTime = this.iracing.formatLapTime(qualUser.best_qual_lap_time);
+                fields.push({ name: '🏃 Best Qualifying Lap', value: qualTime, inline: true });
             }
 
             return fields;

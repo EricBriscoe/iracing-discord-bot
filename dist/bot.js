@@ -375,19 +375,21 @@ class iRacingBot {
     async getLapTimeFields(subsessionId, customerId) {
         try {
             const subsessionDetail = await this.iracing.getSubsessionResult(subsessionId);
-            if (!subsessionDetail)
+            if (!subsessionDetail || !Array.isArray(subsessionDetail.session_results))
                 return [];
             const fields = [];
-            const userResult = subsessionDetail.session_results?.[0]?.results?.find((r) => r.cust_id === customerId);
-            if (userResult) {
-                if (userResult.best_qual_lap_time && userResult.best_qual_lap_time > 0) {
-                    const qualTime = this.iracing.formatLapTime(userResult.best_qual_lap_time);
-                    fields.push({ name: '🏃 Best Qualifying Lap', value: qualTime, inline: true });
-                }
-                if (userResult.best_lap_time && userResult.best_lap_time > 0) {
-                    const raceTime = this.iracing.formatLapTime(userResult.best_lap_time);
-                    fields.push({ name: '⚡ Best Race Lap', value: raceTime, inline: true });
-                }
+            const getType = (sr) => (sr?.simsession_type_name || sr?.simsession_name || sr?.session_type || '').toString();
+            const raceSession = subsessionDetail.session_results.find((sr) => /race/i.test(getType(sr)) && !/qual/i.test(getType(sr)));
+            const raceUser = raceSession?.results?.find((r) => r.cust_id === customerId);
+            if (raceUser && raceUser.best_lap_time && raceUser.best_lap_time > 0) {
+                const raceTime = this.iracing.formatLapTime(raceUser.best_lap_time);
+                fields.push({ name: '⚡ Best Race Lap', value: raceTime, inline: true });
+            }
+            const qualSession = subsessionDetail.session_results.find((sr) => /qual/i.test(getType(sr)));
+            const qualUser = qualSession?.results?.find((r) => r.cust_id === customerId);
+            if (qualUser && qualUser.best_qual_lap_time && qualUser.best_qual_lap_time > 0) {
+                const qualTime = this.iracing.formatLapTime(qualUser.best_qual_lap_time);
+                fields.push({ name: '🏃 Best Qualifying Lap', value: qualTime, inline: true });
             }
             return fields;
         }

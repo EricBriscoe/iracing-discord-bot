@@ -341,34 +341,45 @@ export class iRacingClient {
     }
 
     async getMemberRecentRaces(customerId: number): Promise<RecentRace[] | null> {
-        try {
-            await this.ensureAuthenticated();
-            
+        const fetchOnce = async (): Promise<RecentRace[] | null> => {
             const response = await this.client.get('/data/stats/member_recent_races', {
-                params: {
-                    cust_id: customerId
-                }
+                params: { cust_id: customerId }
             });
 
             let data = response.data;
-            
+
             // Check if response contains a link to S3 data
-            if (data.link) {
+            if (data && (data as any).link) {
                 console.log('Fetching recent races from S3 link');
-                const s3Response = await this.client.get(data.link);
+                const s3Response = await this.client.get((data as any).link);
                 data = s3Response.data;
             }
-            
+
             // Handle the actual data structure - races are in a 'races' property
-            if (data.races && Array.isArray(data.races)) {
-                return data.races as RecentRace[];
+            if (data && Array.isArray((data as any).races)) {
+                return (data as any).races as RecentRace[];
             } else if (Array.isArray(data)) {
                 return data as RecentRace[];
             }
-            
+
             console.warn('Unexpected recent races data format:', typeof data);
             return null;
-        } catch (error) {
+        };
+
+        try {
+            await this.ensureAuthenticated();
+            return await fetchOnce();
+        } catch (error: any) {
+            if (error?.response?.status === 401) {
+                console.log('Authentication expired for recent races, retrying with fresh login...');
+                try {
+                    await this.ensureAuthenticated(true);
+                    return await fetchOnce();
+                } catch (retryError) {
+                    console.error(`Error fetching recent races for ${customerId} after retry:`, retryError);
+                    return null;
+                }
+            }
             console.error(`Error fetching recent races for ${customerId}:`, error);
             return null;
         }
