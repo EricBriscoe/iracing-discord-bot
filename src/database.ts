@@ -429,6 +429,19 @@ export class Database {
         });
     }
 
+    async getAllRaceResultsAsc(): Promise<RaceResult[]> {
+        return new Promise((resolve, reject) => {
+            this.db.all(
+                `SELECT * FROM race_results ORDER BY datetime(start_time) ASC, id ASC`,
+                [],
+                (err, rows: RaceResult[]) => {
+                    if (err) reject(err);
+                    else resolve(rows || []);
+                }
+            );
+        });
+    }
+
     async getRaceResultExists(subsessionId: number, discordId: string): Promise<boolean> {
         return new Promise((resolve, reject) => {
             this.db.get(

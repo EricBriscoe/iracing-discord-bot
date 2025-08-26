@@ -84,6 +84,7 @@ export declare class Database {
     removeRaceLogChannel(channelId: string): Promise<boolean>;
     upsertRaceResult(result: RaceResult): Promise<void>;
     getRecentRaceResults(discordId: string, limit?: number): Promise<RaceResult[]>;
+    getAllRaceResultsAsc(): Promise<RaceResult[]>;
     getRaceResultExists(subsessionId: number, discordId: string): Promise<boolean>;
     getLatestRaceResultTime(discordId: string): Promise<string | null>;
     close(): void;

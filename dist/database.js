@@ -328,6 +328,16 @@ class Database {
             });
         });
     }
+    async getAllRaceResultsAsc() {
+        return new Promise((resolve, reject) => {
+            this.db.all(`SELECT * FROM race_results ORDER BY datetime(start_time) ASC, id ASC`, [], (err, rows) => {
+                if (err)
+                    reject(err);
+                else
+                    resolve(rows || []);
+            });
+        });
+    }
     async getRaceResultExists(subsessionId, discordId) {
         return new Promise((resolve, reject) => {
             this.db.get('SELECT 1 FROM race_results WHERE subsession_id = ? AND discord_id = ?', [subsessionId, discordId], (err, row) => {

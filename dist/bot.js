@@ -23,6 +23,7 @@ class iRacingBot {
             await this.registerSlashCommands();
             await this.updateOfficialSeries();
             this.startSeriesUpdateTimer();
+            await this.rebuildRaceLogsOnStartup();
             this.startRaceResultUpdateTimer();
         });
         this.client.on('interactionCreate', async (interaction) => {
@@ -318,6 +319,128 @@ class iRacingBot {
             console.error('Error posting race result to channels:', error);
         }
     }
+    async clearRaceLogChannel(channel) {
+        try {
+            console.log(`Clearing channel ${channel.id} (${channel.name})...`);
+            let lastId = undefined;
+            const fourteenDaysMs = 14 * 24 * 60 * 60 * 1000;
+            while (true) {
+                const batch = await channel.messages.fetch({ limit: 100, before: lastId });
+                if (batch.size === 0)
+                    break;
+                const now = Date.now();
+                const nonPinned = batch.filter((m) => !m.pinned);
+                const younger = nonPinned.filter((m) => now - m.createdTimestamp < fourteenDaysMs);
+                const older = nonPinned.filter((m) => now - m.createdTimestamp >= fourteenDaysMs);
+                if (younger.size > 0) {
+                    try {
+                        await channel.bulkDelete(younger, true);
+                    }
+                    catch (e) {
+                        for (const msg of younger.values()) {
+                            try {
+                                await msg.delete();
+                            }
+                            catch { }
+                        }
+                    }
+                }
+                for (const msg of older.values()) {
+                    try {
+                        await msg.delete();
+                    }
+                    catch { }
+                }
+                lastId = batch.last()?.id;
+                if (!lastId || batch.size < 100)
+                    break;
+            }
+            console.log(`Channel ${channel.id} cleared.`);
+        }
+        catch (err) {
+            console.error(`Failed to clear channel ${channel.id}:`, err);
+        }
+    }
+    async repostAllFromDatabaseOldestFirst() {
+        try {
+            console.log('Reposting all race results from database (oldest → newest)...');
+            const results = await this.db.getAllRaceResultsAsc();
+            let count = 0;
+            for (const result of results) {
+                let raceData = { car_id: result.car_id, start_position: result.starting_position };
+                try {
+                    const subsession = await this.iracing.getSubsessionResult(result.subsession_id);
+                    if (subsession) {
+                        raceData.event_laps_complete = subsession.event_laps_complete;
+                        raceData.event_strength_of_field = subsession.event_strength_of_field;
+                        const getType = (sr) => (sr?.simsession_type_name || sr?.simsession_name || sr?.session_type || '').toString();
+                        const raceSession = Array.isArray(subsession.session_results) ? subsession.session_results.find((sr) => /race/i.test(getType(sr)) && !/qual/i.test(getType(sr))) : null;
+                        const userRow = raceSession?.results?.find((r) => r.cust_id === result.iracing_customer_id);
+                        if (userRow && typeof userRow.laps_complete === 'number') {
+                            raceData.laps = userRow.laps_complete;
+                        }
+                    }
+                }
+                catch { }
+                await this.postRaceResultToChannels(result, raceData);
+                count++;
+            }
+            console.log(`Reposted ${count} results from database.`);
+        }
+        catch (err) {
+            console.error('Error while reposting from database:', err);
+        }
+    }
+    async backfillRecentFromApiOldestFirst() {
+        try {
+            console.log('Backfilling recent results from API (oldest → newest)...');
+            const linkedUsers = await this.db.getAllLinkedUsers();
+            for (const user of linkedUsers) {
+                if (!user.iracing_customer_id)
+                    continue;
+                try {
+                    const recent = await this.iracing.getMemberRecentRaces(user.iracing_customer_id);
+                    if (!recent || recent.length === 0)
+                        continue;
+                    const toProcess = [];
+                    for (const race of recent) {
+                        const exists = await this.db.getRaceResultExists(race.subsession_id, user.discord_id);
+                        if (!exists)
+                            toProcess.push(race);
+                    }
+                    toProcess.sort((a, b) => new Date(a.session_start_time).getTime() - new Date(b.session_start_time).getTime());
+                    for (const race of toProcess) {
+                        await this.processNewRaceResult(race, user);
+                    }
+                }
+                catch (e) {
+                    console.error(`Backfill error for user ${user.iracing_username}:`, e);
+                }
+            }
+            console.log('API backfill completed.');
+        }
+        catch (err) {
+            console.error('Error during API backfill:', err);
+        }
+    }
+    async rebuildRaceLogsOnStartup() {
+        try {
+            const raceLogChannels = await this.db.getAllRaceLogChannels();
+            if (raceLogChannels.length === 0)
+                return;
+            for (const logChannel of raceLogChannels) {
+                const channel = await this.client.channels.fetch(logChannel.channel_id);
+                if (channel && channel instanceof discord_js_1.TextChannel) {
+                    await this.clearRaceLogChannel(channel);
+                }
+            }
+            await this.repostAllFromDatabaseOldestFirst();
+            await this.backfillRecentFromApiOldestFirst();
+        }
+        catch (err) {
+            console.error('Error rebuilding race logs on startup:', err);
+        }
+    }
     async createRaceResultEmbed(result, raceData) {
         const embed = new discord_js_1.EmbedBuilder()
             .setTitle(`🏁 ${result.series_name}`)
@@ -349,7 +472,17 @@ class iRacingBot {
         const positionChange = startPos ? (startPos - finishPos) : 0;
         const positionChangeStr = positionChange === 0 ? '=' : positionChange > 0 ? `+${positionChange}` : positionChange.toString();
         embed.addFields({ name: '🚦 Starting Position', value: (startPos || 'Unknown').toString(), inline: true }, { name: '🏆 Finishing Position', value: `${finishPos}${this.getOrdinalSuffix(finishPos)}`, inline: true }, { name: '📈 Position Change', value: positionChangeStr, inline: true });
-        embed.addFields({ name: '⚠️ Incidents', value: result.incidents.toString(), inline: true }, { name: '🏁 Laps', value: `${raceData.laps || 'Unknown'}`, inline: true }, { name: '🎯 Strength of Field', value: (raceData.strength_of_field || 'Unknown').toString(), inline: true });
+        const lapsValue = (typeof raceData.laps === 'number')
+            ? raceData.laps
+            : (typeof raceData.event_laps_complete === 'number')
+                ? raceData.event_laps_complete
+                : 'Unknown';
+        const sofValue = (typeof raceData.strength_of_field === 'number')
+            ? raceData.strength_of_field
+            : (typeof raceData.event_strength_of_field === 'number')
+                ? raceData.event_strength_of_field
+                : 'Unknown';
+        embed.addFields({ name: '⚠️ Incidents', value: result.incidents.toString(), inline: true }, { name: '🏁 Laps', value: String(lapsValue), inline: true }, { name: '🎯 Strength of Field', value: String(sofValue), inline: true });
         const lapTimeFields = await this.getLapTimeFields(result.subsession_id, result.iracing_customer_id);
         if (lapTimeFields.length > 0) {
             embed.addFields(...lapTimeFields);
