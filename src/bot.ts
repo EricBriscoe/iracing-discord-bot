@@ -1,4 +1,5 @@
 import { Client, GatewayIntentBits, SlashCommandBuilder, ChatInputCommandInteraction, MessageFlags, PermissionFlagsBits, TextChannel, EmbedBuilder, AttachmentBuilder, Message, Collection, ButtonBuilder, ButtonStyle, ActionRowBuilder, ButtonInteraction } from 'discord.js';
+import axios from 'axios';
 import sharp from 'sharp';
 import { config } from 'dotenv';
 import { Database, OfficialSeries, RaceResult, RaceLogChannel } from './database';
@@ -392,7 +393,7 @@ class iRacingBot {
                 const channel = await this.client.channels.fetch(logChannel.channel_id);
                 if (channel && channel instanceof TextChannel) {
                     const { embed, attachment } = await this.createRaceResultEmbed(raceResult, raceData);
-                    const messageOptions: any = { embeds: [embed] };
+                    const messageOptions: any = { embeds: [embed], allowedMentions: { parse: [], users: [], roles: [], repliedUser: false } };
                     if (attachment) {
                         messageOptions.files = [attachment];
                     }
@@ -547,105 +548,395 @@ class iRacingBot {
             console.warn('Could not fetch car image:', error);
         }
 
-        // Driver and basic info
-        embed.addFields(
-            { name: '🏃 Driver', value: `<@${result.discord_id}> (${result.iracing_username})`, inline: true },
-            { name: '🏁 Track', value: `${result.track_name}${result.config_name ? ` (${result.config_name})` : ''}`, inline: true },
-            { name: '🏎️ Car', value: result.car_name, inline: true }
-        );
+        // Legacy field blocks removed — the AI or fallback description will provide a structured summary.
 
-        // Position information
-        const startPos = result.starting_position || raceData.start_position;
-        const finishPos = result.finish_position;
-        const positionChange = startPos ? (startPos - finishPos) : 0;
-        const positionChangeStr = positionChange === 0 ? '=' : positionChange > 0 ? `+${positionChange}` : positionChange.toString();
-        
-        embed.addFields(
-            { name: '🚦 Starting Position', value: (startPos || 'Unknown').toString(), inline: true },
-            { name: '🏆 Finishing Position', value: `${finishPos}${this.getOrdinalSuffix(finishPos)}`, inline: true },
-            { name: '📈 Position Change', value: positionChangeStr, inline: true }
-        );
+        // Precompute context values for AI and fallback
+        let context: any = {};
+        try {
+            const http = await this.iracing.getHttpClient();
+            const subsession = await this.iracing.getSubsessionResult(result.subsession_id);
+            const getType = (sr: any) => (sr?.simsession_type_name || sr?.simsession_name || sr?.session_type || '').toString();
+            const raceSession = Array.isArray(subsession?.session_results)
+                ? subsession!.session_results.find((sr: any) => /race/i.test(getType(sr)) && !/qual/i.test(getType(sr)))
+                : null;
+            const userRow = raceSession?.results?.find((r: any) => r.cust_id === result.iracing_customer_id);
+            const simsessionNumber: number = raceSession?.simsession_number ?? 0;
 
-        // Performance data
-        const lapsValue = (typeof raceData.laps === 'number')
-            ? raceData.laps
-            : (typeof raceData.event_laps_complete === 'number')
-                ? raceData.event_laps_complete
-                : 'Unknown';
-        const sofValue = (typeof raceData.strength_of_field === 'number')
-            ? raceData.strength_of_field
-            : (typeof raceData.event_strength_of_field === 'number')
-                ? raceData.event_strength_of_field
-                : 'Unknown';
-        embed.addFields(
-            { name: '⚠️ Incidents', value: result.incidents.toString(), inline: true },
-            { name: '🏁 Laps', value: String(lapsValue), inline: true },
-            { name: '🎯 Strength of Field', value: String(sofValue), inline: true }
-        );
+            const startPos = (result.starting_position ?? raceData.start_position);
+            const finishPos = (typeof userRow?.finish_position === 'number') ? userRow.finish_position : result.finish_position;
+            const posChange = (typeof startPos === 'number' && typeof finishPos === 'number') ? (startPos - finishPos) : undefined;
+            const lapsComplete = (typeof userRow?.laps_complete === 'number')
+                ? userRow.laps_complete
+                : (typeof subsession?.event_laps_complete === 'number')
+                    ? subsession!.event_laps_complete
+                    : (typeof raceData.laps === 'number' ? raceData.laps : undefined);
+            const sof = (typeof subsession?.event_strength_of_field === 'number')
+                ? subsession!.event_strength_of_field
+                : (typeof raceData.event_strength_of_field === 'number' ? raceData.event_strength_of_field : undefined);
+            const bestLap = (typeof userRow?.best_lap_time === 'number' && userRow.best_lap_time > 0)
+                ? { time: this.iracing.formatLapTime(userRow.best_lap_time), lap: userRow.best_lap_num }
+                : null;
+            const avgLap = (typeof userRow?.average_lap === 'number' && userRow.average_lap > 0)
+                ? this.iracing.formatLapTime(userRow.average_lap)
+                : null;
+            const champPoints = (typeof userRow?.champ_points === 'number') ? userRow.champ_points : (raceData.points ?? undefined);
+            const gapToWinner = (typeof userRow?.interval === 'number' && userRow.interval > 0)
+                ? this.iracing.formatLapTime(userRow.interval)
+                : undefined;
+            const irDelta = (typeof result.irating_before === 'number' && typeof result.irating_after === 'number')
+                ? (result.irating_after - result.irating_before)
+                : undefined;
 
-        // Add lap times if available
-        const lapTimeFields = await this.getLapTimeFields(result.subsession_id, result.iracing_customer_id);
-        if (lapTimeFields.length > 0) {
-            embed.addFields(...lapTimeFields);
+            // Qualifying details
+            let qual: { time?: string; lap?: number; position?: number } | null = null;
+            try {
+                const qualSession = Array.isArray(subsession?.session_results)
+                    ? subsession!.session_results.find((sr: any) => /qual/i.test((sr?.simsession_type_name || sr?.simsession_name || sr?.session_type || '').toString()))
+                    : null;
+                const qualUser = qualSession?.results?.find((r: any) => r.cust_id === result.iracing_customer_id);
+                if (qualUser) {
+                    const qTime = (typeof qualUser.best_qual_lap_time === 'number' && qualUser.best_qual_lap_time > 0)
+                        ? this.iracing.formatLapTime(qualUser.best_qual_lap_time)
+                        : undefined;
+                    const qLap = (typeof qualUser.best_qual_lap_num === 'number' && qualUser.best_qual_lap_num > 0) ? qualUser.best_qual_lap_num : undefined;
+                    const qPos = typeof qualUser.finish_position === 'number' ? qualUser.finish_position : undefined;
+                    qual = { time: qTime, lap: qLap, position: qPos };
+                }
+            } catch {}
+
+            // Field context and race-best lap
+            let fieldSize: number | undefined;
+            let classPos: number | undefined = (typeof userRow?.finish_position_in_class === 'number') ? userRow.finish_position_in_class : undefined;
+            let raceBestLapTime: string | undefined;
+            let wrDeltaPct: number | undefined;
+            try {
+                if (Array.isArray(raceSession?.results)) {
+                    fieldSize = raceSession!.results.length;
+                    // best lap in field
+                    let min = Number.MAX_SAFE_INTEGER;
+                    for (const r of raceSession!.results) {
+                        if (typeof r.best_lap_time === 'number' && r.best_lap_time > 0 && r.best_lap_time < min) min = r.best_lap_time;
+                    }
+                    if (min !== Number.MAX_SAFE_INTEGER) raceBestLapTime = this.iracing.formatLapTime(min);
+                }
+                // WR delta
+                if (result.car_id && result.track_id) {
+                    const wr = await this.iracing.getWorldRecordBestLap(result.car_id, result.track_id);
+                    if (wr && typeof userRow?.best_lap_time === 'number' && userRow.best_lap_time > 0) {
+                        wrDeltaPct = ((userRow.best_lap_time - wr) / wr) * 100;
+                    }
+                }
+            } catch {}
+
+            // Position-by-lap trend (best-effort) via lap_chart_data
+            let posTrend: { start?: number; end?: number; min?: number; max?: number } | undefined;
+            try {
+                const lc = await http.get('/data/results/lap_chart_data', { params: { subsession_id: result.subsession_id, simsession_number: simsessionNumber } });
+                const lcd = lc.data?.link ? (await http.get(lc.data.link)).data : lc.data;
+                // Heuristic: search for arrays keyed by driver/customer indicating position per lap
+                // We will try a few shapes defensively.
+                const extractPositions = (data: any): number[] | null => {
+                    try {
+                        if (!data) return null;
+                        // Case 1: data has chunk_info -> fetch first chunk for { laps: [...] }
+                        const ci = data?.chunk_info;
+                        if (ci && ci.base_download_url && Array.isArray(ci.chunk_file_names) && ci.chunk_file_names.length > 0) {
+                            // Fetch and parse first chunk only
+                            // Note: we already have http available in scope
+                            // But to keep simple and avoid another round trip, skip chunked here.
+                            return null;
+                        }
+                        // Case 2: data.laps is array with entries containing per-car positions per lap
+                        if (Array.isArray(data.laps)) {
+                            // Look for objects keyed by cust_id or name
+                            for (const lap of data.laps) {
+                                // Not enough structure certainty; bail out
+                                break;
+                            }
+                            return null;
+                        }
+                        return null;
+                    } catch { return null; }
+                };
+                const positions = extractPositions(lcd);
+                if (Array.isArray(positions) && positions.length > 0) {
+                    const s = positions[0];
+                    const e = positions[positions.length - 1];
+                    const mn = Math.min(...positions);
+                    const mx = Math.max(...positions);
+                    posTrend = { start: s, end: e, min: mn, max: mx };
+                }
+            } catch {}
+
+            // Pit stop and cautions from event_log
+            let pitStops: number | undefined;
+            let cautions: number | undefined;
+            try {
+                const ev = await http.get('/data/results/event_log', { params: { subsession_id: result.subsession_id, simsession_number: simsessionNumber } });
+                const evd = ev.data?.link ? (await http.get(ev.data.link)).data : ev.data;
+                const rows: any[] = Array.isArray(evd) ? evd : (Array.isArray(evd?.events) ? evd.events : []);
+                let pit = 0; let cau = 0;
+                for (const r of rows) {
+                    const t = (r?.type || r?.event || '').toString().toLowerCase();
+                    if (t.includes('pit')) {
+                        // If event has cust_id, count only matching driver; else count all
+                        if (!r?.cust_id || r.cust_id === result.iracing_customer_id) pit++;
+                    }
+                    if (t.includes('caution')) cau++;
+                }
+                pitStops = pit || undefined;
+                cautions = cau || undefined;
+            } catch {}
+            // Summarize lap events
+            let incidentCount = 0;
+            const eventCounts = new Map<string, number>();
+            const lapAll: Array<{ lap: number; t: number; incident: boolean; events: string[] }> = [];
+            try {
+                const lapResp = await http.get('/data/results/lap_data', {
+                    params: { subsession_id: result.subsession_id, simsession_number: simsessionNumber, cust_id: result.iracing_customer_id }
+                });
+                const lapMeta = lapResp.data?.link ? (await http.get(lapResp.data.link)).data : lapResp.data;
+                const ci = lapMeta?.chunk_info;
+                if (ci && ci.base_download_url && Array.isArray(ci.chunk_file_names)) {
+                    const base = String(ci.base_download_url).replace(/\/$/, '/');
+                    for (const name of ci.chunk_file_names) {
+                        const url = base + name;
+                        try {
+                            const chunk = await http.get(url);
+                            const rows: any[] = Array.isArray(chunk.data) ? chunk.data : [];
+                            for (const r of rows) {
+                                if (r?.lap_number > 0 && r?.incident) incidentCount++;
+                                const evs: string[] = Array.isArray(r?.lap_events) ? r.lap_events : [];
+                                for (const e of evs) eventCounts.set(e, (eventCounts.get(e) || 0) + 1);
+                                if (typeof r?.lap_number === 'number' && r.lap_number > 0) {
+                                    const lt = typeof r?.lap_time === 'number' ? r.lap_time : -1;
+                                    lapAll.push({ lap: r.lap_number, t: lt, incident: !!r?.incident, events: evs });
+                                }
+                            }
+                        } catch {}
+                    }
+                }
+            } catch {}
+            const eventsSummary = Array.from(eventCounts.entries())
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 5)
+                .map(([k, v]) => `${k}×${v}`)
+                .join(', ');
+
+            // Build concise lap highlights (best, worst, and up to 3 incident laps)
+            let lapHighlights = '';
+            try {
+                const valids = lapAll.filter(x => typeof x.t === 'number' && x.t > 0);
+                const byLap = new Map<number, { lap: number; t: number; incident: boolean; events: string[] }>();
+                for (const r of valids) if (!byLap.has(r.lap)) byLap.set(r.lap, r);
+                const arr = Array.from(byLap.values());
+                if (arr.length > 0) {
+                    const best = arr.reduce((a, b) => (a.t <= 0 || (b.t > 0 && b.t < a.t)) ? b : a, arr[0]!);
+                    const worst = arr.reduce((a, b) => (b.t > a.t ? b : a), arr[0]!);
+                    const incidents = arr.filter(r => r.incident).sort((a, b) => b.t - a.t).slice(0, 3);
+                    const picked: Array<{ lap: number; label: string }> = [];
+                    if (best && best.t > 0) picked.push({ lap: best.lap, label: `Best L${best.lap} ${this.iracing.formatLapTime(best.t)}` });
+                    if (worst && worst.lap !== best?.lap && worst.t > 0) picked.push({ lap: worst.lap, label: `Worst L${worst.lap} ${this.iracing.formatLapTime(worst.t)}` });
+                    for (const r of incidents) {
+                        if (picked.find(p => p.lap === r.lap)) continue;
+                        const ev = r.events && r.events.length ? ` (${r.events.join(', ')})` : '';
+                        picked.push({ lap: r.lap, label: `L${r.lap} ${this.iracing.formatLapTime(r.t)}${ev}` });
+                        if (picked.length >= 5) break;
+                    }
+                    lapHighlights = picked.map(p => p.label).join(' • ');
+                }
+            } catch {}
+
+            const underperformed = (
+                (typeof finishPos === 'number' && finishPos > 10) ||
+                (typeof posChange === 'number' && posChange < 0) ||
+                (typeof result.incidents === 'number' && result.incidents >= 6) ||
+                (typeof irDelta === 'number' && irDelta < 0)
+            );
+
+            context = {
+                startPos, finishPos, posChange, lapsComplete, sof,
+                bestLap, avgLap, champPoints, gapToWinner, irDelta,
+                incidentCount, eventsSummary, lapHighlights,
+                qual,
+                fieldSize, classPos,
+                raceBestLapTime,
+                wrDeltaPct,
+                pitStops, cautions,
+                posTrend
+            };
+            (context as any).performance = underperformed ? 'poor' : 'good';
+        } catch {}
+
+        // Generate AI-crafted race summary via OpenRouter (optional)
+        try {
+            const model = process.env.OPENROUTER_MODEL?.trim();
+            const apiKey = process.env.OPENROUTER_KEY?.trim();
+            if (model && apiKey) {
+                const sys = 'You are Robin Miller writing race summaries for Discord embeds. Keep it concise to avoid exceeding discords text length limits.';
+                // Build recent history for this user (context for trend/news). Up to 30 prior events.
+                let historyBlock = '';
+                try {
+                    const recent = await this.db.getRecentRaceResults(result.discord_id, 32);
+                    if (Array.isArray(recent) && recent.length > 0) {
+                        const lines: string[] = [];
+                        for (const r of recent) {
+                            if (r.subsession_id === result.subsession_id) continue; // skip current
+                            const date = new Date(r.start_time).toISOString().slice(0, 10);
+                            const cfg = (r.config_name && r.config_name.length) ? ` (${r.config_name})` : '';
+                            // Enrich with subsession details where possible
+                            let sofStr = '';
+                            let lapsStr = '';
+                            let bestStr = '';
+                            let avgStr = '';
+                            let ptsStr = '';
+                            try {
+                                const ss = await this.iracing.getSubsessionResult(r.subsession_id);
+                                const getType2 = (sr: any) => (sr?.simsession_type_name || sr?.simsession_name || sr?.session_type || '').toString();
+                                const raceSess = Array.isArray(ss?.session_results) ? ss.session_results.find((sr: any) => /race/i.test(getType2(sr)) && !/qual/i.test(getType2(sr))) : null;
+                                const row = raceSess?.results?.find((x: any) => x.cust_id === r.iracing_customer_id);
+                                const sof = (typeof ss?.event_strength_of_field === 'number') ? ss.event_strength_of_field : undefined;
+                                if (typeof sof === 'number') sofStr = ` • SoF ${sof}`;
+                                const laps = (typeof row?.laps_complete === 'number') ? row.laps_complete : (typeof ss?.event_laps_complete === 'number' ? ss.event_laps_complete : undefined);
+                                if (typeof laps === 'number') lapsStr = ` • Laps ${laps}`;
+                                if (typeof row?.best_lap_time === 'number' && row.best_lap_time > 0) bestStr = ` • Best ${this.iracing.formatLapTime(row.best_lap_time)}`;
+                                if (typeof row?.average_lap === 'number' && row.average_lap > 0) avgStr = ` • Avg ${this.iracing.formatLapTime(row.average_lap)}`;
+                                if (typeof row?.champ_points === 'number') ptsStr = ` • Pts ${row.champ_points}`;
+                            } catch {}
+                            const startStr = (typeof r.starting_position === 'number') ? `Start ${r.starting_position} → ` : '';
+                            const irDelta = (typeof r.irating_before === 'number' && typeof r.irating_after === 'number') ? (r.irating_after - r.irating_before) : undefined;
+                            const deltaStr = (typeof irDelta === 'number') ? ` (${irDelta >= 0 ? '+' : ''}${irDelta})` : '';
+                            const irStr = (typeof r.irating_before === 'number' && typeof r.irating_after === 'number') ? ` • iR ${r.irating_before}→${r.irating_after}${deltaStr}` : '';
+                            const carStr = r.car_name ? ` • ${r.car_name}` : '';
+                            lines.push(`${date}: ${r.series_name} @ ${r.track_name}${cfg}${carStr} • ${startStr}P${r.finish_position} • ${r.incidents}x${lapsStr}${sofStr}${bestStr}${avgStr}${ptsStr}${irStr}`);
+                            if (lines.length >= 10) break;
+                        }
+                        if (lines.length > 0) historyBlock = lines.join('\n');
+                    }
+                } catch {}
+
+                const ask = [
+                    `Driver: ${result.iracing_username}`,
+                    `Series: ${result.series_name}`,
+                    `Track: ${result.track_name}${result.config_name ? ` (${result.config_name})` : ''}`,
+                    `Car: ${result.car_name}`,
+                    `Start → Finish: ${context.startPos ?? '?'} → ${context.finishPos ?? '?'}`,
+                    typeof context.posChange === 'number' ? `Net: ${context.posChange > 0 ? '+' : ''}${context.posChange}` : '',
+                    typeof context.lapsComplete === 'number' ? `Laps: ${context.lapsComplete}` : '',
+                    typeof context.sof === 'number' ? `SoF: ${context.sof}` : '',
+                    `Incidents: ${result.incidents}`,
+                    context.bestLap ? `Best Lap: ${context.bestLap.time} (L${context.bestLap.lap})` : '',
+                    context.avgLap ? `Avg Lap: ${context.avgLap}` : '',
+                    typeof context.champPoints === 'number' ? `Points: ${context.champPoints}` : '',
+                    typeof context.irDelta === 'number' ? `iRating: ${result.irating_before} → ${result.irating_after} (${context.irDelta >= 0 ? '+' : ''}${context.irDelta})` : '',
+                    context.gapToWinner ? `Gap to Winner: ${context.gapToWinner}` : '',
+                    context.eventsSummary ? `Notable: ${context.eventsSummary}` : '',
+                    context.lapHighlights ? `Lap Highlights: ${context.lapHighlights}` : '',
+                    context.qual?.time ? `Qual: ${context.qual.time}${context.qual.lap ? ` (L${context.qual.lap})` : ''}${typeof context.qual.position === 'number' ? `, P${context.qual.position}` : ''}` : '',
+                    typeof context.fieldSize === 'number' ? `Field: ${context.fieldSize}${typeof context.classPos === 'number' ? `, Class P${context.classPos}` : ''}` : '',
+                    context.raceBestLapTime ? `Race Best: ${context.raceBestLapTime}` : '',
+                    typeof context.wrDeltaPct === 'number' ? `% over WR: ${context.wrDeltaPct.toFixed(1)}%` : '',
+                    typeof context.pitStops === 'number' ? `Pit Stops: ${context.pitStops}` : '',
+                    typeof context.cautions === 'number' ? `Cautions: ${context.cautions}` : '',
+                    context.posTrend ? `Trend: start ${context.posTrend.start ?? '?'} → end ${context.posTrend.end ?? '?'} (min ${context.posTrend.min ?? '?'}, max ${context.posTrend.max ?? '?'})` : '',
+                ].filter(Boolean).join('\n');
+
+                const promptLines: string[] = [
+                    'Recent Results (most recent first):',
+                    historyBlock,
+                    '',
+                    'Latest race data (primary focus):',
+                    ask,
+                    '',
+                    'Write a quick news report paragraph for a discord embed in the style of Robin Miller—evocative and witty yet precise—summarizing the latest race.',
+                    'Explicitly contextualize this performance vs the driver\'s recent results (positions, incidents, iRating trend, lap pace) using the provided history.',
+                    "Then add a 'Details' list with short labeled lines (headings with emojis) covering the most relevant numeric details from the latest race and the racers recent trends."
+                ];
+                const prompt = promptLines.join('\n');
+
+                const baseUrl = process.env.OPENROUTER_BASE?.trim() || 'https://openrouter.ai/api/v1';
+                const resp = await axios.post(
+                    `${baseUrl}/chat/completions`,
+                    {
+                        model,
+                        messages: [
+                            { role: 'system', content: sys },
+                            { role: 'user', content: prompt }
+                        ]
+                    },
+                    {
+                        headers: {
+                            'Authorization': `Bearer ${apiKey}`,
+                            'Content-Type': 'application/json',
+                            // Optional OpenRouter headers for attribution
+                            'HTTP-Referer': 'https://github.com/ericbriscoe/iracing-discord-bot',
+                            'X-Title': 'iRacing Discord Bot'
+                        },
+                        timeout: 15000
+                    }
+                );
+                const text = resp.data?.choices?.[0]?.message?.content?.toString?.() || '';
+                let summary = text.length > 1500 ? (text.slice(0, 1495) + '…') : text;
+                if (summary) {
+                    // Replace the user's iRacing name with a Discord mention (non-pinging via allowedMentions on send)
+                    const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    try {
+                        // Case-insensitive, capture optional possessive 's or ’s and preserve it after the mention
+                        const nameRe = new RegExp(`\\b${esc(result.iracing_username)}((?:'s|’s)?)\\b`, 'gi');
+                        summary = summary.replace(nameRe, (_m: string, poss: string) => `<@${result.discord_id}>${poss || ''}`);
+                    } catch {}
+                    // Prefer description for better width; ensure within limit
+                    embed.setDescription(summary);
+                }
+            }
+        } catch (e) {
+            // If AI summary fails, we silently skip.
         }
 
-        // Add qualifying time if available and > 0
-        if (raceData.qualifying_time && raceData.qualifying_time > 0) {
-            const qualifyingTime = this.iracing.formatLapTime(raceData.qualifying_time);
-            embed.addFields({ name: '⏱️ Qualifying Time', value: qualifyingTime, inline: true });
-        }
+        // Fallback: if no description yet, build a structured, emoji-labeled summary ourselves
+        if (!embed.data.description) {
+            const lines: string[] = [];
+            lines.push(`👤 Driver: <@${result.discord_id}> (${result.iracing_username})`);
+            lines.push(`🏁 Series: ${result.series_name}`);
+            lines.push(`🗺️ Track: ${result.track_name}${result.config_name ? ` (${result.config_name})` : ''}`);
+            lines.push(`🏎️ Car: ${result.car_name}`);
+            const sfin = (context.startPos !== undefined || context.finishPos !== undefined)
+                ? `Start → Finish: ${context.startPos ?? '?'} → ${context.finishPos ?? '?'}`
+                : undefined;
+            const net = (typeof context.posChange === 'number') ? `Net: ${context.posChange > 0 ? '+' : ''}${context.posChange}` : undefined;
+            if (sfin || net) lines.push(`🚦 ${[sfin, net].filter(Boolean).join(' • ')}`);
+            const raceBits: string[] = [];
+            if (typeof context.lapsComplete === 'number') raceBits.push(`${context.lapsComplete} laps`);
+            if (typeof context.sof === 'number') raceBits.push(`SoF ${context.sof}`);
+            raceBits.push(`${result.incidents} inc`);
+            lines.push(`🏟️ Race: ${raceBits.join(' • ')}`);
+            const perf: string[] = [];
+            if (context.bestLap) perf.push(`Best ${context.bestLap.time} (L${context.bestLap.lap})`);
+            if (context.avgLap) perf.push(`Avg ${context.avgLap}`);
+            if (typeof context.champPoints === 'number') perf.push(`Pts ${context.champPoints}`);
+            if (typeof context.irDelta === 'number') perf.push(`iR ${result.irating_before} → ${result.irating_after} (${context.irDelta >= 0 ? '+' : ''}${context.irDelta})`);
+            if (context.gapToWinner) perf.push(`Gap ${context.gapToWinner}`);
+            if (perf.length) lines.push(`📊 ${perf.join(' • ')}`);
+            const extra: string[] = [];
+            if (context.qual?.time) extra.push(`Qual ${context.qual.time}${context.qual.lap ? ` (L${context.qual.lap})` : ''}${typeof context.qual.position === 'number' ? `, P${context.qual.position}` : ''}`);
+            if (typeof context.fieldSize === 'number') extra.push(`Field ${context.fieldSize}${typeof context.classPos === 'number' ? `, Class P${context.classPos}` : ''}`);
+            if (context.raceBestLapTime) extra.push(`Race Best ${context.raceBestLapTime}`);
+            if (typeof context.wrDeltaPct === 'number') extra.push(`${context.wrDeltaPct.toFixed(1)}% over WR`);
+            if (typeof context.pitStops === 'number') extra.push(`${context.pitStops} stops`);
+            if (typeof context.cautions === 'number') extra.push(`${context.cautions} cautions`);
+            if (context.posTrend) extra.push(`Trend ${context.posTrend.start ?? '?'}→${context.posTrend.end ?? '?'} (min ${context.posTrend.min ?? '?'}, max ${context.posTrend.max ?? '?'})`);
+            if (extra.length) lines.push(`🧩 ${extra.join(' • ')}`);
+            if (context.eventsSummary) lines.push(`🔎 Notable: ${context.eventsSummary}`);
+            if (context.lapHighlights) lines.push(`🧾 Laps: ${context.lapHighlights}`);
 
-        // Add iRating change if available
-        if (result.irating_before && result.irating_after) {
-            const iRatingChange = result.irating_after - result.irating_before;
-            const changeStr = iRatingChange >= 0 ? `+${iRatingChange}` : iRatingChange.toString();
-            embed.addFields({
-                name: '📊 iRating Change',
-                value: `${result.irating_before} → ${result.irating_after} (${changeStr})`,
-                inline: true
-            });
-        }
-
-        // Add championship points if available
-        if (raceData.points) {
-            embed.addFields({ name: '🏆 Points Earned', value: raceData.points.toString(), inline: true });
+            const text = lines.join('\n');
+            embed.setDescription(text.length > 4096 ? text.slice(0, 4090) + '…' : text);
         }
 
         return { embed, attachment };
     }
 
-    private async getLapTimeFields(subsessionId: number, customerId: number): Promise<Array<{name: string, value: string, inline: boolean}>> {
-        try {
-            // Get detailed subsession result for lap times
-            const subsessionDetail = await this.iracing.getSubsessionResult(subsessionId);
-            if (!subsessionDetail || !Array.isArray(subsessionDetail.session_results)) return [];
-
-            const fields: Array<{name: string, value: string, inline: boolean}> = [];
-
-            const getType = (sr: any) => (sr?.simsession_type_name || sr?.simsession_name || sr?.session_type || '').toString();
-
-            // Prefer the Race session for best race lap
-            const raceSession = subsessionDetail.session_results.find((sr: any) => /race/i.test(getType(sr)) && !/qual/i.test(getType(sr)));
-            const raceUser = raceSession?.results?.find((r: any) => r.cust_id === customerId);
-            if (raceUser && raceUser.best_lap_time && raceUser.best_lap_time > 0) {
-                const raceTime = this.iracing.formatLapTime(raceUser.best_lap_time);
-                fields.push({ name: '⚡ Best Race Lap', value: raceTime, inline: true });
-            }
-
-            // Prefer the Qualifying session for best qualifying lap
-            const qualSession = subsessionDetail.session_results.find((sr: any) => /qual/i.test(getType(sr)));
-            const qualUser = qualSession?.results?.find((r: any) => r.cust_id === customerId);
-            if (qualUser && qualUser.best_qual_lap_time && qualUser.best_qual_lap_time > 0) {
-                const qualTime = this.iracing.formatLapTime(qualUser.best_qual_lap_time);
-                fields.push({ name: '🏃 Best Qualifying Lap', value: qualTime, inline: true });
-            }
-
-            return fields;
-        } catch (error) {
-            console.warn('Could not fetch lap time data:', error);
-            return [];
-        }
-    }
+    // (Removed) getLapTimeFields — legacy per-embed lap time fields no longer used.
 
     // ===== History command support =====
     private async handleHistoryCommand(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -786,6 +1077,8 @@ class iRacingBot {
             const wr = wrCache.get(`${r.car_id}:${r.track_id}`);
             if (!best || !wr || wr <= 0) continue;
             const pct = ((best - wr) / wr) * 100;
+            // Eliminate outliers more than 50% slower than the WR
+            if (pct > 50) continue;
             const t = new Date(r.start_time).getTime();
             points.push({ t, y: pct });
         }

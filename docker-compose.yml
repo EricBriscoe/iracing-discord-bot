@@ -6,6 +6,9 @@ services:
       - IRACING_USERNAME=${IRACING_USERNAME}
       - IRACING_HASHWORD=${IRACING_HASHWORD}
       - IRACING_PASSWORD=${IRACING_PASSWORD}
+      - OPENROUTER_KEY=${OPENROUTER_KEY}
+      - OPENROUTER_MODEL=${OPENROUTER_MODEL}
+      - OPENROUTER_BASE=${OPENROUTER_BASE}
     volumes:
       - ./data:/app/data
     restart: unless-stopped
