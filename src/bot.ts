@@ -51,6 +51,12 @@ class iRacingBot {
                         case 'history':
                             await this.handleHistoryCommand(interaction);
                             break;
+                        case 'prompt':
+                            await this.handlePromptCommand(interaction);
+                            break;
+                        case 'cleanprompt':
+                            await this.handleCleanPromptCommand(interaction);
+                            break;
                     }
                 } catch (error) {
                     console.error('Error handling interaction:', error);
@@ -100,6 +106,18 @@ class iRacingBot {
             new SlashCommandBuilder()
                 .setName('history')
                 .setDescription('Show your % over WR history for all cars on a track, with range & track navigation')
+            ,
+            new SlashCommandBuilder()
+                .setName('prompt')
+                .setDescription('Add a server-specific prompt line prepended to AI race summaries')
+                .addStringOption(option =>
+                    option.setName('text')
+                        .setDescription('Prompt line to add (recommended under 300 chars)')
+                        .setRequired(true)
+                ),
+            new SlashCommandBuilder()
+                .setName('cleanprompt')
+                .setDescription('Delete all server-specific prompt additions (admin only)')
         ];
 
         try {
@@ -123,6 +141,45 @@ class iRacingBot {
         }
         
         return false;
+    }
+
+    private async handlePromptCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+        if (!interaction.guildId) {
+            await interaction.reply({ content: 'This command can only be used in a server.', flags: [MessageFlags.Ephemeral] });
+            return;
+        }
+        const text = (interaction.options.getString('text', true) || '').trim();
+        if (!text || text.length < 2) {
+            await interaction.reply({ content: 'Please provide a non-empty prompt.', flags: [MessageFlags.Ephemeral] });
+            return;
+        }
+        const content = text.length > 1000 ? text.slice(0, 1000) : text;
+        try {
+            await this.db.addGuildPrompt(interaction.guildId, content);
+            const all = await this.db.getGuildPrompts(interaction.guildId);
+            await interaction.reply({ content: `✅ Added. This server now has ${all.length} prompt line(s) that will be prepended to AI summaries.`, flags: [MessageFlags.Ephemeral] });
+        } catch (e) {
+            console.error('prompt add failed:', e);
+            await interaction.reply({ content: '❌ Failed to add prompt.', flags: [MessageFlags.Ephemeral] });
+        }
+    }
+
+    private async handleCleanPromptCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+        if (!interaction.guildId) {
+            await interaction.reply({ content: 'This command can only be used in a server.', flags: [MessageFlags.Ephemeral] });
+            return;
+        }
+        if (!this.isServerAdmin(interaction)) {
+            await interaction.reply({ content: '❌ Only server administrators can clean prompts.', flags: [MessageFlags.Ephemeral] });
+            return;
+        }
+        try {
+            const removed = await this.db.clearGuildPrompts(interaction.guildId);
+            await interaction.reply({ content: `🧹 Cleared ${removed} prompt line(s) for this server.`, flags: [MessageFlags.Ephemeral] });
+        } catch (e) {
+            console.error('cleanprompt failed:', e);
+            await interaction.reply({ content: '❌ Failed to clear prompts.', flags: [MessageFlags.Ephemeral] });
+        }
     }
 
     private async handleLinkCommand(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -413,7 +470,7 @@ class iRacingBot {
             for (const logChannel of raceLogChannels) {
                 const channel = await this.client.channels.fetch(logChannel.channel_id);
                 if (channel && channel instanceof TextChannel) {
-                    const { embed, attachment } = await this.createRaceResultEmbed(raceResult, raceData);
+                    const { embed, attachment } = await this.createRaceResultEmbed(raceResult, raceData, logChannel.guild_id);
                     const messageOptions: any = { embeds: [embed], allowedMentions: { parse: [], users: [], roles: [], repliedUser: false } };
                     if (attachment) {
                         messageOptions.files = [attachment];
@@ -540,7 +597,7 @@ class iRacingBot {
         }
     }
 
-    private async createRaceResultEmbed(result: RaceResult, raceData: any): Promise<{ embed: EmbedBuilder; attachment?: AttachmentBuilder }> {
+    private async createRaceResultEmbed(result: RaceResult, raceData: any, guildIdForPrompts?: string): Promise<{ embed: EmbedBuilder; attachment?: AttachmentBuilder }> {
         const embed = new EmbedBuilder()
             .setTitle(`🏁 ${result.series_name}`)
             .setColor(this.getPositionColor(result.finish_position))
@@ -789,6 +846,24 @@ class iRacingBot {
             (context as any).performance = underperformed ? 'poor' : 'good';
         } catch {}
 
+        // Helper: compact event log digest for prompt context
+        const buildEventLogDigest = (ctx: any): string => {
+            try {
+                const parts: string[] = [];
+                if (ctx?.posTrend) {
+                    const { start, end, min, max } = ctx.posTrend;
+                    parts.push(`Pos ${start ?? '?'}→${end ?? '?'} (min ${min ?? '?'}, max ${max ?? '?'})`);
+                }
+                if (typeof ctx?.cautions === 'number') parts.push(`Cautions ${ctx.cautions}`);
+                if (typeof ctx?.pitStops === 'number') parts.push(`Pits ${ctx.pitStops}`);
+                if (typeof ctx?.incidentCount === 'number') parts.push(`Inc ${ctx.incidentCount}`);
+                if (ctx?.eventsSummary) parts.push(ctx.eventsSummary);
+                if (ctx?.lapHighlights) parts.push(`Laps: ${ctx.lapHighlights}`);
+                const line = parts.join(' • ');
+                return line.length > 500 ? (line.slice(0, 495) + '…') : line;
+            } catch { return ''; }
+        };
+
         // Generate AI-crafted race summary via OpenRouter (optional)
         try {
             const model = process.env.OPENROUTER_MODEL?.trim();
@@ -862,9 +937,24 @@ class iRacingBot {
                     context.posTrend ? `Trend: start ${context.posTrend.start ?? '?'} → end ${context.posTrend.end ?? '?'} (min ${context.posTrend.min ?? '?'}, max ${context.posTrend.max ?? '?'})` : '',
                 ].filter(Boolean).join('\n');
 
+                const eventLogBlock = buildEventLogDigest(context);
+                // Fetch guild-specific prompt additions (prepended at the very top)
+                let guildPromptHeader = '';
+                try {
+                    if (guildIdForPrompts) {
+                        const extras = await this.db.getGuildPrompts(guildIdForPrompts);
+                        if (extras.length > 0) {
+                            guildPromptHeader = extras.join('\n');
+                        }
+                    }
+                } catch {}
                 const promptLines: string[] = [
+                    ...(guildPromptHeader ? [guildPromptHeader, ''] : []),
                     'Recent Results (most recent first):',
                     historyBlock,
+                    '',
+                    'Event Log (latest race):',
+                    eventLogBlock || '(none)',
                     '',
                     'Latest race data (primary focus):',
                     ask,

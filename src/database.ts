@@ -174,6 +174,16 @@ export class Database {
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         `);
+
+        // Server-specific prompt additions prepended to AI prompts
+        await run(`
+            CREATE TABLE IF NOT EXISTS guild_prompts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
     }
 
     async linkUser(discordId: string, iracingUsername: string, iracingCustomerId?: number): Promise<void> {
@@ -378,6 +388,42 @@ export class Database {
         ) as RaceLogChannel[];
         
         return results;
+    }
+
+    // Guild prompt methods
+    async addGuildPrompt(guildId: string, content: string): Promise<void> {
+        return new Promise((resolve, reject) => {
+            this.db.run(
+                'INSERT INTO guild_prompts (guild_id, content) VALUES (?, ?)',
+                [guildId, content],
+                (err) => {
+                    if (err) reject(err);
+                    else resolve();
+                }
+            );
+        });
+    }
+
+    async getGuildPrompts(guildId: string): Promise<string[]> {
+        return new Promise((resolve, reject) => {
+            this.db.all(
+                'SELECT content FROM guild_prompts WHERE guild_id = ? ORDER BY created_at ASC, id ASC',
+                [guildId],
+                (err, rows: Array<{ content: string }>) => {
+                    if (err) reject(err);
+                    else resolve((rows || []).map(r => r.content));
+                }
+            );
+        });
+    }
+
+    async clearGuildPrompts(guildId: string): Promise<number> {
+        return new Promise((resolve, reject) => {
+            this.db.run('DELETE FROM guild_prompts WHERE guild_id = ?', [guildId], function(err) {
+                if (err) reject(err);
+                else resolve(this.changes || 0);
+            });
+        });
     }
 
     async removeRaceLogChannel(channelId: string): Promise<boolean> {
