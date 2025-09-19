@@ -336,7 +336,28 @@ class iRacingBot {
                 carName = 'Unknown Car';
             }
 
-            // Create race result record directly from member_recent_races data
+            // Prefer authoritative positions from subsession detail (1-based), fallback to member_recent_races
+            let finalFinishPos: number | undefined = undefined;
+            let finalStartPos: number | undefined = undefined;
+            try {
+                const subsession = await this.iracing.getSubsessionResult(raceData.subsession_id);
+                const getType = (sr: any) => (sr?.simsession_type_name || sr?.simsession_name || sr?.session_type || '').toString();
+                const raceSession = Array.isArray(subsession?.session_results)
+                    ? subsession!.session_results.find((sr: any) => /race/i.test(getType(sr)) && !/qual/i.test(getType(sr)))
+                    : null;
+                const userRow = raceSession?.results?.find((r: any) => r.cust_id === user.iracing_customer_id);
+                if (typeof userRow?.finish_position === 'number') finalFinishPos = userRow.finish_position;
+                if (typeof userRow?.starting_position === 'number') finalStartPos = userRow.starting_position;
+            } catch {}
+
+            // Normalize member_recent_races positions if subsession not available
+            const mrFinish = typeof raceData.finish_position === 'number' ? raceData.finish_position : undefined;
+            const mrStart = typeof raceData.start_position === 'number' ? raceData.start_position : undefined;
+            // Some iRacing list endpoints can be 0-based; if we see 0 for winner, shift to 1-based conservatively
+            const normalizedMrFinish = (typeof mrFinish === 'number' && mrFinish === 0) ? (mrFinish + 1) : mrFinish;
+            const normalizedMrStart = (typeof mrStart === 'number' && mrStart === 0) ? (mrStart + 1) : mrStart;
+
+            // Create race result record
             const raceResult: RaceResult = {
                 subsession_id: raceData.subsession_id,
                 discord_id: user.discord_id,
@@ -350,8 +371,8 @@ class iRacingBot {
                 car_id: raceData.car_id,
                 car_name: carName,
                 start_time: raceData.session_start_time,
-                finish_position: raceData.finish_position,
-                starting_position: raceData.start_position,
+                finish_position: (finalFinishPos ?? normalizedMrFinish) as number,
+                starting_position: (finalStartPos ?? normalizedMrStart) as number,
                 incidents: raceData.incidents,
                 irating_before: raceData.oldi_rating,
                 irating_after: raceData.newi_rating,
