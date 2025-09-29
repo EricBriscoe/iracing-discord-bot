@@ -393,7 +393,7 @@ class iRacingBot {
                 carName = 'Unknown Car';
             }
 
-            // Prefer authoritative positions from subsession detail (1-based), fallback to member_recent_races
+            // Prefer authoritative positions from subsession detail (finish appears 0-based; start appears 1-based). Normalize to 1-based for storage/display.
             let finalFinishPos: number | undefined = undefined;
             let finalStartPos: number | undefined = undefined;
             try {
@@ -403,16 +403,20 @@ class iRacingBot {
                     ? subsession!.session_results.find((sr: any) => /race/i.test(getType(sr)) && !/qual/i.test(getType(sr)))
                     : null;
                 const userRow = raceSession?.results?.find((r: any) => r.cust_id === user.iracing_customer_id);
-                if (typeof userRow?.finish_position === 'number') finalFinishPos = userRow.finish_position;
-                if (typeof userRow?.starting_position === 'number') finalStartPos = userRow.starting_position;
+                if (typeof userRow?.finish_position === 'number') finalFinishPos = userRow.finish_position; // likely 0-based
+                if (typeof userRow?.starting_position === 'number') finalStartPos = userRow.starting_position; // likely 1-based
             } catch {}
 
-            // Normalize member_recent_races positions if subsession not available
-            const mrFinish = typeof raceData.finish_position === 'number' ? raceData.finish_position : undefined;
-            const mrStart = typeof raceData.start_position === 'number' ? raceData.start_position : undefined;
-            // Some iRacing list endpoints can be 0-based; if we see 0 for winner, shift to 1-based conservatively
-            const normalizedMrFinish = (typeof mrFinish === 'number' && mrFinish === 0) ? (mrFinish + 1) : mrFinish;
-            const normalizedMrStart = (typeof mrStart === 'number' && mrStart === 0) ? (mrStart + 1) : mrStart;
+            // Normalize member_recent_races values as well
+            const mrFinish = (typeof raceData.finish_position === 'number') ? raceData.finish_position : undefined;
+            const mrStart = (typeof raceData.start_position === 'number') ? raceData.start_position : undefined;
+            // Finish is 0-based in many list endpoints; adjust to 1-based. Start should be 1-based; nudge 0 to 1.
+            const humanFinish = (typeof finalFinishPos === 'number')
+                ? (finalFinishPos + 1)
+                : (typeof mrFinish === 'number' ? (mrFinish + 1) : undefined);
+            const humanStart = (typeof finalStartPos === 'number')
+                ? (finalStartPos === 0 ? 1 : finalStartPos)
+                : (typeof mrStart === 'number' ? (mrStart === 0 ? 1 : mrStart) : undefined);
 
             // Create race result record
             const raceResult: RaceResult = {
@@ -428,8 +432,8 @@ class iRacingBot {
                 car_id: raceData.car_id,
                 car_name: carName,
                 start_time: raceData.session_start_time,
-                finish_position: (finalFinishPos ?? normalizedMrFinish) as number,
-                starting_position: (finalStartPos ?? normalizedMrStart) as number,
+                finish_position: (humanFinish as number),
+                starting_position: (humanStart as number),
                 incidents: raceData.incidents,
                 irating_before: raceData.oldi_rating,
                 irating_after: raceData.newi_rating,
@@ -640,8 +644,13 @@ class iRacingBot {
             const userRow = raceSession?.results?.find((r: any) => r.cust_id === result.iracing_customer_id);
             const simsessionNumber: number = raceSession?.simsession_number ?? 0;
 
-            const startPos = (result.starting_position ?? raceData.start_position);
-            const finishPos = (typeof userRow?.finish_position === 'number') ? userRow.finish_position : result.finish_position;
+            // Normalize for display: finishPos 1-based, startPos 1-based
+            const startPos = (typeof userRow?.starting_position === 'number')
+                ? (userRow.starting_position === 0 ? 1 : userRow.starting_position)
+                : ((typeof result.starting_position === 'number') ? result.starting_position : (typeof raceData.start_position === 'number' ? (raceData.start_position === 0 ? 1 : raceData.start_position) : undefined));
+            const finishPos = (typeof userRow?.finish_position === 'number')
+                ? (userRow.finish_position + 1)
+                : ((typeof result.finish_position === 'number') ? result.finish_position : (typeof raceData.finish_position === 'number' ? (raceData.finish_position + 1) : undefined));
             const posChange = (typeof startPos === 'number' && typeof finishPos === 'number') ? (startPos - finishPos) : undefined;
             const lapsComplete = (typeof userRow?.laps_complete === 'number')
                 ? userRow.laps_complete
@@ -677,14 +686,14 @@ class iRacingBot {
                         ? this.iracing.formatLapTime(qualUser.best_qual_lap_time)
                         : undefined;
                     const qLap = (typeof qualUser.best_qual_lap_num === 'number' && qualUser.best_qual_lap_num > 0) ? qualUser.best_qual_lap_num : undefined;
-                    const qPos = typeof qualUser.finish_position === 'number' ? qualUser.finish_position : undefined;
+                    const qPos = typeof qualUser.finish_position === 'number' ? (qualUser.finish_position + 1) : undefined;
                     qual = { time: qTime, lap: qLap, position: qPos };
                 }
             } catch {}
 
             // Field context and race-best lap
             let fieldSize: number | undefined;
-            let classPos: number | undefined = (typeof userRow?.finish_position_in_class === 'number') ? userRow.finish_position_in_class : undefined;
+            let classPos: number | undefined = (typeof userRow?.finish_position_in_class === 'number') ? (userRow.finish_position_in_class + 1) : undefined;
             let raceBestLapTime: string | undefined;
             let wrDeltaPct: number | undefined;
             try {
